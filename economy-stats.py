@@ -2093,54 +2093,33 @@ class EconomyAnalyzer:
         self,
         settings,
         context,
-        use_actual_game_mix=True,
+        use_actual_game_mix=False,
     ):
+        """Estimate each activity group's monthly game result.
+
+        Every group uses the same server-wide average game result per play.
+        The only group-specific part is how much that group actually plays.
+        This prevents small or unusual group-specific game mixes from creating
+        extreme optimizer results. The use_actual_game_mix argument is kept
+        only for compatibility with older saved UI code and is ignored.
+        """
         factor30 = self.get_30_day_factor()
         predictions = {}
 
-        if use_actual_game_mix:
-            for group_name in ACTIVITY_GROUP_NAMES:
-                member_count = len(
-                    context["members"].get(
-                        group_name,
-                        set(),
-                    )
-                )
-                if member_count <= 0:
-                    predictions[group_name] = 0.0
-                    continue
-
-                proposed_net = 0.0
-                for game in GAME_ORDER:
-                    txs = context["group_game_txs"][group_name][game]
-                    if not txs:
-                        continue
-                    result = self.simulate_game(
-                        game,
-                        txs,
-                        settings,
-                    )
-                    proposed_net += result["proposed_net"]
-
-                predictions[group_name] = (
-                    proposed_net
-                    * factor30
-                    / member_count
-                )
-
-            return predictions
-
         global_net = 0.0
         global_rounds = 0.0
+
         for game in GAME_ORDER:
             txs = context["global_game_txs"][game]
             if not txs:
                 continue
+
             result = self.simulate_game(
                 game,
                 txs,
                 settings,
             )
+
             global_net += result["proposed_net"]
             global_rounds += result["proposed_rounds"]
 
@@ -2149,6 +2128,7 @@ class EconomyAnalyzer:
             if global_rounds > 0
             else 0.0
         )
+
         activity_scale = (
             settings["proposed_games_per_5m"]
             / max(
@@ -2164,6 +2144,7 @@ class EconomyAnalyzer:
                     set(),
                 )
             )
+
             if member_count <= 0:
                 predictions[group_name] = 0.0
                 continue
@@ -2175,6 +2156,7 @@ class EconomyAnalyzer:
                 )
                 * activity_scale
             )
+
             predictions[group_name] = (
                 average_net_per_round
                 * proposed_rounds
@@ -2190,7 +2172,7 @@ class EconomyAnalyzer:
         targets,
         locked_keys,
         basis="Combined activity",
-        use_actual_game_mix=True,
+        use_actual_game_mix=False,
     ):
         if not targets:
             raise ValueError(
@@ -6296,11 +6278,6 @@ class EconomyViewer:
             optimizer_basis = "Combined activity"
 
         try:
-            use_group_game_mix = self.sim_use_group_game_mix_var.get()
-        except Exception:
-            use_group_game_mix = True
-
-        try:
             activity_group_basis = self.activity_group_basis_dropdown.get()
         except Exception:
             activity_group_basis = "Combined activity"
@@ -6438,9 +6415,6 @@ class EconomyViewer:
             try:
                 self.sim_optimizer_basis_dropdown.set(
                     optimizer_basis
-                )
-                self.sim_use_group_game_mix_var.set(
-                    use_group_game_mix
                 )
                 self.activity_group_basis_dropdown.set(
                     activity_group_basis
@@ -8751,7 +8725,8 @@ class EconomyViewer:
             text=(
                 "Choose one or more activity groups, enter how much you want an average member to gain or lose from games over 30 days, then let the program search for nearby settings. "
                 "You can select a group by clicking its checkbox or group name. Typing a target automatically selects that group. "
-                "Locked values are never changed. Targets apply to game profit only because this panel can only change game settings."
+                "Locked values are never changed. Targets apply to game profit only because this panel can only change game settings. "
+                "All activity groups use the same server-wide average game result, so a small group having an unusually lucky or unusual mix of games cannot distort the target search."
             ),
             bg=CARD,
             fg=MUTED,
@@ -8798,20 +8773,21 @@ class EconomyViewer:
             padx=(0, 16),
         )
 
-        self.sim_use_group_game_mix_var = tk.BooleanVar(
-            value=True
-        )
-
-        tk.Checkbutton(
+        tk.Label(
             optimizer_options,
-            text="Use each activity group's actual game mix",
-            variable=self.sim_use_group_game_mix_var,
+            text=(
+                "Earnings use the server-wide average game result. "
+                "Groups differ by activity level, not by which games they happened to play."
+            ),
             bg=CARD,
-            fg=TEXT,
-            selectcolor=DEEP_BG,
-            activebackground=CARD,
-            activeforeground=TEXT,
-            highlightthickness=0,
+            fg=MUTED,
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=620,
+            font=(
+                "Segoe UI",
+                8,
+            ),
         ).pack(
             side=tk.LEFT,
             padx=(0, 12),
@@ -10930,18 +10906,13 @@ class EconomyViewer:
         except Exception:
             basis = "Combined activity"
 
-        try:
-            use_actual_mix = self.sim_use_group_game_mix_var.get()
-        except Exception:
-            use_actual_mix = True
-
         context = self.analyzer.prepare_activity_optimizer_context(
             basis
         )
         predictions = self.analyzer.evaluate_activity_group_monthly(
             settings,
             context,
-            use_actual_game_mix=use_actual_mix,
+            use_actual_game_mix=False,
         )
 
         for group_name in ACTIVITY_GROUP_NAMES:
@@ -11056,7 +11027,7 @@ class EconomyViewer:
 
             settings = self.get_simulator_settings()
             basis = self.sim_optimizer_basis_dropdown.get()
-            use_actual_mix = self.sim_use_group_game_mix_var.get()
+            use_actual_mix = False
             locked_keys = self.get_locked_simulator_keys()
 
             self.sim_optimizer_status_label.config(
@@ -11101,16 +11072,10 @@ class EconomyViewer:
                         fg=MUTED,
                     )
 
-            mix_words = (
-                "each group's actual game mix"
-                if use_actual_mix
-                else "the server-wide game mix with each group's activity level"
-            )
-
             self.sim_optimizer_status_label.config(
                 text=(
                     f"Finished after {result['evaluations']:,} setting checks. The average absolute miss across the selected targets is about {result['average_absolute_miss']:,.0f} per month. "
-                    f"The search used {mix_words}. Locked values were left exactly as entered. The optimizer chooses the closest combination it can find, so several targets may not be possible to hit exactly with one shared set of game settings. "
+                    "The search used the same server-wide average game result for every activity group and only changed the amount of activity between groups. Locked values were left exactly as entered. The optimizer chooses the closest combination it can find, so several targets may not be possible to hit exactly with one shared set of game settings. "
                     "Blackjack deck count is not auto-tuned because this program does not claim an exact profit change from deck count alone, and Animal Race has no normal global min/max bet setting to tune."
                 )
             )
