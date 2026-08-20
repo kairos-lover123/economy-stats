@@ -235,7 +235,7 @@ Example folder:
 EconomyAnalytics/
 │
 ├── economy-stats.dht
-├── PythonApplication30_fully_explained.py
+├── economy-stats.py
 └── README.md
 ```
 
@@ -311,7 +311,7 @@ You can also run the program directly from Command Prompt.
 Open Command Prompt inside the project folder and run:
 
 ```bash
-python PythonApplication30_fully_explained.py
+python economy-stats.py
 ```
 
 If your file has a different name, replace the filename with the actual `.py` filename.
@@ -319,7 +319,7 @@ If your file has a different name, replace the filename with the actual `.py` fi
 If `python` does not work but `py` does, use:
 
 ```bash
-py PythonApplication30_fully_explained.py
+py economy-stats.py
 ```
 
 ---
