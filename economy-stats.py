@@ -120,6 +120,19 @@ GAME_ORDER = [
     "russian roulette",
     "slot machine",
     "higher or lower",
+    "animal race",
+]
+
+# These games use the normal UnbelievaBoat min/max bet-limit settings.
+# Animal Race is intentionally excluded because its allowed bet is tied to
+# the selected animal's price rather than a normal global bet-limit setting.
+BET_LIMIT_GAMES = [
+    "blackjack",
+    "cockfight",
+    "roulette",
+    "russian roulette",
+    "slot machine",
+    "higher or lower",
 ]
 
 GAME_DISPLAY = {
@@ -129,6 +142,7 @@ GAME_DISPLAY = {
     "russian roulette": "Russian Roulette",
     "slot machine": "Slot Machine",
     "higher or lower": "Higher or Lower",
+    "animal race": "Animal Race",
 }
 
 GAME_COMMAND_NAMES = {
@@ -304,6 +318,18 @@ def is_chicken_purchase(reason):
     )
 
 
+def is_animal_race_purchase(reason):
+    """Return True for animal/provision purchases used by Animal Race."""
+    lower = clean_reason(reason).lower()
+
+    return (
+        lower.startswith("buy animal")
+        or lower.startswith("buy provision")
+        or lower.startswith("animals buy")
+        or lower.startswith("provisions buy")
+    )
+
+
 def canonical_reason(
     reason,
     chicken_as_cockfight=True,
@@ -352,6 +378,7 @@ def canonical_reason(
     if (
         lower.startswith("animal race")
         or lower.startswith("animal-race")
+        or is_animal_race_purchase(cleaned)
     ):
         return "animal race"
 
@@ -433,6 +460,13 @@ def game_from_reason(reason):
 
     if lower.startswith("roulette"):
         return "roulette"
+
+    if (
+        lower.startswith("animal race")
+        or lower.startswith("animal-race")
+        or is_animal_race_purchase(cleaned)
+    ):
+        return "animal race"
 
     return None
 
@@ -2044,15 +2078,13 @@ class EconomyAnalyzer:
         settings,
     ):
         current = (
-            settings[
-                "games"
-            ][game]["current"]
+            settings["games"].get(game, {})
+            .get("current")
         )
 
         proposed = (
-            settings[
-                "games"
-            ][game]["proposed"]
+            settings["games"].get(game, {})
+            .get("proposed")
         )
 
         current_usage = max(
@@ -2118,6 +2150,117 @@ class EconomyAnalyzer:
             if inferred_rounds
             else fallback_rounds
         )
+
+        # Animal Race is handled differently from the other games.
+        #
+        # Race bets and race winnings scale when the proposed game activity
+        # changes. Animal/provision purchases do not. A horse can be reused for
+        # many races, so increasing the number of races must not pretend that
+        # the user buys the same horse again for every additional race.
+        #
+        # Purchases remain at the rate actually seen in the selected history.
+        # This also avoids inventing a race-to-provision relationship that is
+        # not present in the database.
+        if game == "animal race":
+            purchase_txs = [
+                tx
+                for tx in txs
+                if is_animal_race_purchase(
+                    tx["original_reason"]
+                )
+            ]
+
+            race_txs = [
+                tx
+                for tx in txs
+                if not is_animal_race_purchase(
+                    tx["original_reason"]
+                )
+            ]
+
+            purchase_net = sum(
+                tx["total"]
+                for tx in purchase_txs
+            )
+
+            purchase_earned = sum(
+                tx["total"]
+                for tx in purchase_txs
+                if tx["total"] > 0
+            )
+
+            purchase_lost = -sum(
+                tx["total"]
+                for tx in purchase_txs
+                if tx["total"] < 0
+            )
+
+            race_net = sum(
+                tx["total"]
+                for tx in race_txs
+            )
+
+            race_earned = sum(
+                tx["total"]
+                for tx in race_txs
+                if tx["total"] > 0
+            )
+
+            race_lost = -sum(
+                tx["total"]
+                for tx in race_txs
+                if tx["total"] < 0
+            )
+
+            current_avg_bet = (
+                sum(bets) / len(bets)
+                if bets
+                else 0
+            )
+
+            proposed_rounds = (
+                observed_rounds
+                * activity_scale
+            )
+
+            proposed_net = (
+                purchase_net
+                + race_net * activity_scale
+            )
+
+            proposed_earned = (
+                purchase_earned
+                + race_earned * activity_scale
+            )
+
+            proposed_lost = (
+                purchase_lost
+                + race_lost * activity_scale
+            )
+
+            return {
+                "game": game,
+                "observed_rounds": observed_rounds,
+                "proposed_rounds": proposed_rounds,
+                "current_avg_bet": current_avg_bet,
+                "proposed_avg_bet": current_avg_bet,
+                "observed_net": observed_net,
+                "observed_earned": observed_earned,
+                "observed_lost": observed_lost,
+                "current_model_net": observed_net,
+                "current_model_earned": observed_earned,
+                "current_model_lost": observed_lost,
+                "proposed_net": proposed_net,
+                "proposed_earned": proposed_earned,
+                "proposed_lost": proposed_lost,
+                "activity_scale": activity_scale,
+                "fixed_purchase_net": purchase_net,
+                "fixed_purchase_earned": purchase_earned,
+                "fixed_purchase_lost": purchase_lost,
+                "race_net": race_net,
+                "race_earned": race_earned,
+                "race_lost": race_lost,
+            }
 
         if not bets:
             return {
@@ -6070,7 +6213,9 @@ class EconomyViewer:
             "sources_table",
             (
                 "This box will point out which game or command gave users the most money, which took the most, "
-                "how often they were used, and what that means for the economy."
+                "how often they were used, and what that means for the economy. Game-related spending is kept with "
+                "the game it belongs to: chicken purchases count with Cock Fight, and animal/provision purchases count "
+                "with Animal Race instead of being hidden inside a generic Buy total."
             ),
         )
 
@@ -6456,8 +6601,14 @@ class EconomyViewer:
 
         self.sim_window_card = self.make_help_card(
             page,
-            "Run the simulation and this box will explain the actual results in plain language.",
-            height=110,
+            (
+                "Run the simulation and this box will explain the actual results in plain language. "
+                "Animal Race is included automatically, including race bets, winnings, animal purchases and provision purchases. "
+                "Its bet amount is kept from the history instead of being shown as a normal configurable bet limit. "
+                "Animal and provision purchases are kept at the rate actually seen in the history when you change race activity, "
+                "so increasing the number of races does not pretend that someone buys the same horse again for every extra race."
+            ),
+            height=130,
         )
 
         self.page_explanation_cards[
@@ -6618,7 +6769,7 @@ class EconomyViewer:
 
         row_number = 2
 
-        for game in GAME_ORDER:
+        for game in BET_LIMIT_GAMES:
             tk.Label(
                 settings_inner,
                 text=(
@@ -9031,7 +9182,7 @@ class EconomyViewer:
                 "Cockfight starting chance cannot exceed max chance."
             )
 
-        for game in GAME_ORDER:
+        for game in BET_LIMIT_GAMES:
             current_min = parse_float(
                 self.sim_vars[
                     f"{game}:current_min"
@@ -9233,8 +9384,16 @@ class EconomyViewer:
                     except Exception:
                         pass
 
+                extra_game_text = ""
+
+                if game == "Animal Race":
+                    extra_game_text = (
+                        " Horse, animal and provision purchases are not multiplied just because the number of races changes. "
+                        "If someone bought one horse and then raced it many times, that horse purchase is still only counted at the purchase rate seen in the history."
+                    )
+
                 game_explanations.append(
-                    f"{game}: {play_text} {bet_text} With the current settings, {current_text}; with your new settings, {proposed_text}. {effect_text}{win_text}"
+                    f"{game}: {play_text} {bet_text} With the current settings, {current_text}; with your new settings, {proposed_text}. {effect_text}{win_text}{extra_game_text}"
                 )
 
             lines.append(
@@ -9513,7 +9672,7 @@ class EconomyViewer:
                     "before a copy-paste command can be generated."
                 )
 
-        for game in GAME_ORDER:
+        for game in BET_LIMIT_GAMES:
             command_name = GAME_COMMAND_NAMES[
                 game
             ]
@@ -9721,7 +9880,7 @@ class EconomyViewer:
             )
         )
 
-        for game in GAME_ORDER:
+        for game in BET_LIMIT_GAMES:
             current_min = DEFAULT_GAME_LIMITS[
                 game
             ]["min"]
