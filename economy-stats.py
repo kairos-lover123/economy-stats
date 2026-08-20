@@ -748,9 +748,10 @@ class EconomyAnalyzer:
 
         if not db_path.exists():
             raise FileNotFoundError(
-                "Database not found. Place 'economy-stats.dht' "
-                "in the same folder as this Python program.\n\n"
-                f"Expected path:\n{db_path}"
+                "Database not found.\n\n"
+                f"Current database location:\n{db_path}\n\n"
+                "Click 'Choose Database' at the top of the program "
+                "to select a .dht or SQLite database manually."
             )
 
         return sqlite3.connect(
@@ -5769,6 +5770,19 @@ class EconomyViewer:
 
         RoundedButton(
             right,
+            "Choose Database",
+            self.choose_database,
+            width=128,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        ).pack(
+            side=tk.LEFT,
+            padx=(0, 8),
+        )
+
+        RoundedButton(
+            right,
             "Reload",
             self.load_database,
             width=92,
@@ -7931,6 +7945,77 @@ class EconomyViewer:
             end_time,
         )
 
+    def choose_database(self):
+        current_path = Path(
+            self.analyzer.db_path
+        )
+
+        if current_path.parent.exists():
+            initial_directory = (
+                current_path.parent
+            )
+        else:
+            initial_directory = BASE_DIR
+
+        selected_path = (
+            filedialog.askopenfilename(
+                title="Choose Economy Database",
+                initialdir=str(
+                    initial_directory
+                ),
+                filetypes=[
+                    (
+                        "Discord History Tracker databases",
+                        "*.dht",
+                    ),
+                    (
+                        "SQLite databases",
+                        "*.db",
+                    ),
+                    (
+                        "SQLite databases",
+                        "*.sqlite",
+                    ),
+                    (
+                        "SQLite databases",
+                        "*.sqlite3",
+                    ),
+                    (
+                        "All files",
+                        "*.*",
+                    ),
+                ],
+            )
+        )
+
+        if not selected_path:
+            return
+
+        previous_path = (
+            self.analyzer.db_path
+        )
+
+        self.analyzer.db_path = (
+            Path(selected_path)
+        )
+
+        if self.load_database():
+            return
+
+        # If the selected file could not be loaded, restore the
+        # previous database location. If it still exists, reload it so
+        # the existing dashboard is not left in a half-loaded state.
+        self.analyzer.db_path = (
+            previous_path
+        )
+
+        previous = Path(
+            previous_path
+        )
+
+        if previous.exists():
+            self.load_database()
+
     def load_database(self):
         self.status_label.config(
             text="Loading database..."
@@ -7959,9 +8044,13 @@ class EconomyViewer:
                     ]
                 )
 
+                selected_db = Path(
+                    self.analyzer.db_path
+                )
+
                 self.dataset_label.config(
                     text=(
-                        "Dataset "
+                        f"{selected_db.name}  |  "
                         f"{to_local_string(first)}"
                         " to "
                         f"{to_local_string(last)}"
@@ -7973,7 +8062,8 @@ class EconomyViewer:
                         f"{len(self.analyzer.all_transactions):,} parsed\n"
                         f"{to_local_string(first)[:10]}"
                         " to "
-                        f"{to_local_string(last)[:10]}"
+                        f"{to_local_string(last)[:10]}\n"
+                        f"{selected_db.name}"
                     )
                 )
 
@@ -8031,6 +8121,8 @@ class EconomyViewer:
 
             self.mark_sim_dirty()
 
+            return True
+
         except Exception as error:
             self.status_label.config(
                 text="Database load failed"
@@ -8040,6 +8132,8 @@ class EconomyViewer:
                 "Database Error",
                 str(error),
             )
+
+            return False
 
     def apply_filters(self):
         if not (
