@@ -8424,6 +8424,7 @@ class EconomyViewer:
             optimizer_inner,
             text=(
                 "Choose one or more activity groups, enter how much you want an average member to gain or lose from games over 30 days, then let the program search for nearby settings. "
+                "You can select a group by clicking its checkbox or group name. Typing a target automatically selects that group. "
                 "Locked values are never changed. Targets apply to game profit only because this panel can only change game settings."
             ),
             bg=CARD,
@@ -8550,34 +8551,49 @@ class EconomyViewer:
             self.sim_target_enabled_vars[group_name] = enabled_var
             self.sim_target_value_vars[group_name] = target_var
 
-            tk.Checkbutton(
+            group_checkbox = tk.Checkbutton(
                 target_row,
+                text="Select",
                 variable=enabled_var,
                 bg=CARD,
+                fg=TEXT,
                 selectcolor=DEEP_BG,
                 activebackground=CARD,
+                activeforeground=TEXT,
                 highlightthickness=0,
-                width=5,
+                width=7,
                 anchor="w",
-            ).pack(
+                cursor="hand2",
+            )
+            group_checkbox.pack(
                 side=tk.LEFT,
                 padx=(0, 8),
             )
 
-            tk.Label(
+            group_label = tk.Label(
                 target_row,
                 text=group_name,
                 width=18,
                 anchor="w",
                 bg=CARD,
                 fg=TEXT,
+                cursor="hand2",
                 font=(
                     "Segoe UI Semibold",
                     9,
                 ),
-            ).pack(
+            )
+            group_label.pack(
                 side=tk.LEFT,
                 padx=(0, 8),
+            )
+
+            # The whole group label is clickable, not just the small checkbox.
+            # This makes selecting target groups much easier.
+            group_label.bind(
+                "<Button-1>",
+                lambda event, name=group_name:
+                    self.toggle_activity_target_group(name),
             )
 
             current_label = tk.Label(
@@ -8592,6 +8608,14 @@ class EconomyViewer:
                 side=tk.LEFT,
                 padx=(0, 8),
             )
+            current_label.config(
+                cursor="hand2"
+            )
+            current_label.bind(
+                "<Button-1>",
+                lambda event, name=group_name:
+                    self.toggle_activity_target_group(name),
+            )
             self.sim_target_current_labels[group_name] = current_label
 
             target_entry = RoundedEntry(
@@ -8603,6 +8627,23 @@ class EconomyViewer:
             target_entry.pack(
                 side=tk.LEFT,
                 padx=(0, 16),
+            )
+
+            # Focusing or typing in a target automatically selects the group.
+            target_entry.bind(
+                "<Button-1>",
+                lambda event, name=group_name:
+                    self.enable_activity_target_group(name),
+            )
+            target_entry.bind(
+                "<FocusIn>",
+                lambda event, name=group_name:
+                    self.enable_activity_target_group(name),
+            )
+            target_var.trace_add(
+                "write",
+                lambda *args, name=group_name:
+                    self.enable_activity_target_group_if_target(name),
             )
 
             result_label = tk.Label(
@@ -10495,6 +10536,46 @@ class EconomyViewer:
                 "money received is what that source paid them, money spent/lost is what it took, the final change is the difference, and the two percentage columns show how much of all their received money or all their lost money came from that source."
             )
         )
+    def enable_activity_target_group(
+        self,
+        group_name,
+    ):
+        var = self.sim_target_enabled_vars.get(
+            group_name
+        )
+        if var is not None:
+            var.set(True)
+
+    def enable_activity_target_group_if_target(
+        self,
+        group_name,
+    ):
+        target_var = self.sim_target_value_vars.get(
+            group_name
+        )
+        enabled_var = self.sim_target_enabled_vars.get(
+            group_name
+        )
+
+        if (
+            target_var is not None
+            and enabled_var is not None
+            and target_var.get().strip()
+        ):
+            enabled_var.set(True)
+
+    def toggle_activity_target_group(
+        self,
+        group_name,
+    ):
+        var = self.sim_target_enabled_vars.get(
+            group_name
+        )
+        if var is not None:
+            var.set(
+                not bool(var.get())
+            )
+
     def set_all_sim_locks(
         self,
         value,
