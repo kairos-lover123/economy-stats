@@ -137,6 +137,22 @@ BET_LIMIT_GAMES = [
     "higher or lower",
 ]
 
+# The target optimizer should not solve the economy by making one or two games
+# absurdly profitable. It softly tries to keep these configurable games
+# beneficial and relevant at the same time.
+#
+# Russian Roulette is intentionally excluded because it is allowed to remain
+# a bad/high-risk option. Animal Race is excluded from this balancing objective
+# because its normal profitability cannot be directly tuned through the same
+# global settings as the games below.
+BALANCED_OPTIMIZER_GAMES = [
+    "blackjack",
+    "cockfight",
+    "roulette",
+    "slot machine",
+    "higher or lower",
+]
+
 GAME_DISPLAY = {
     "blackjack": "Blackjack",
     "cockfight": "Cock Fight",
@@ -2205,10 +2221,33 @@ class EconomyAnalyzer:
             )
 
         for game in BET_LIMIT_GAMES:
+            # Russian Roulette is intentionally left alone by automatic target
+            # optimization. It may remain a high-risk / losing game and should
+            # never become the optimizer's shortcut for funding every group.
+            if game == "russian roulette":
+                continue
+
             for field in ("min", "max"):
                 lock_key = f"{game}:proposed_{field}"
                 if lock_key in locked_keys:
                     continue
+
+                base_value = float(
+                    base["games"][game][
+                        "proposed"
+                    ][field]
+                )
+
+                # Keep the automatic search in a realistic neighborhood.
+                # Manually entered values can still be larger and can be locked.
+                automatic_upper = min(
+                    10000.0,
+                    max(
+                        500.0,
+                        base_value * 6.0,
+                    ),
+                )
+
                 specs.append(
                     {
                         "key": lock_key,
@@ -2216,7 +2255,7 @@ class EconomyAnalyzer:
                         "game": game,
                         "field": field,
                         "min": 1.0,
-                        "max": 100000.0,
+                        "max": automatic_upper,
                     }
                 )
 
@@ -2231,7 +2270,7 @@ class EconomyAnalyzer:
                 "proposed_slot_multiplier",
                 "multiplier",
                 0.1,
-                20.0,
+                10.0,
             ),
             (
                 "proposed_cockfight_start",
@@ -2309,6 +2348,268 @@ class EconomyAnalyzer:
             return True
 
         prediction_cache = {}
+        balance_cache = {}
+
+        def evaluate_game_balance(settings):
+            """Softly keep the normal configurable games useful together.
+
+            Russian Roulette is intentionally ignored. The monthly target is
+            still the primary goal, but this penalty stops the optimizer from
+            reaching it by turning one category into an extreme money printer.
+            """
+            game_rows = []
+
+            for game in BALANCED_OPTIMIZER_GAMES:
+                txs = context[
+                    "global_game_txs"
+                ].get(
+                    game,
+                    [],
+                )
+
+                if not txs:
+                    continue
+
+                result = self.simulate_game(
+                    game,
+                    txs,
+                    settings,
+                )
+
+                rounds = float(
+                    result.get(
+                        "proposed_rounds",
+                        0.0,
+                    )
+                )
+
+                if rounds <= 0:
+                    continue
+
+                proposed_net = float(
+                    result.get(
+                        "proposed_net",
+                        0.0,
+                    )
+                )
+                current_net = float(
+                    result.get(
+                        "current_model_net",
+                        0.0,
+                    )
+                )
+                proposed_lost = float(
+                    result.get(
+                        "proposed_lost",
+                        0.0,
+                    )
+                )
+
+                denominator = max(
+                    1.0,
+                    abs(proposed_lost),
+                )
+
+                return_rate = (
+                    proposed_net
+                    / denominator
+                )
+
+                scored_rate = max(
+                    -1.0,
+                    min(
+                        1.0,
+                        return_rate,
+                    ),
+                )
+
+                game_rows.append(
+                    {
+                        "game": game,
+                        "proposed_net": proposed_net,
+                        "current_net": current_net,
+                        "uplift": (
+                            proposed_net
+                            - current_net
+                        ),
+                        "return_rate": return_rate,
+                        "scored_rate": scored_rate,
+                        "rounds": rounds,
+                    }
+                )
+
+            if not game_rows:
+                return {
+                    "penalty": 0.0,
+                    "profitable_games": 0,
+                    "game_count": 0,
+                    "largest_positive_share": 0.0,
+                    "rows": [],
+                }
+
+            game_count = len(game_rows)
+
+            # Prefer every normal configurable game to be beneficial.
+            beneficial_penalty = 0.0
+            profitable_games = 0
+
+            for row in game_rows:
+                rate = row["scored_rate"]
+
+                if row["proposed_net"] > 0:
+                    profitable_games += 1
+                else:
+                    beneficial_penalty += (
+                        0.18
+                        + 0.85
+                        * abs(
+                            min(
+                                0.0,
+                                rate,
+                            )
+                        )
+                    )
+
+            beneficial_penalty /= max(
+                1,
+                game_count,
+            )
+
+            # Keep expected player return rates reasonably close so one game
+            # does not become obviously superior to all the others.
+            rates = [
+                row["scored_rate"]
+                for row in game_rows
+            ]
+            median_rate = statistics.median(
+                rates
+            )
+            rate_spread_penalty = (
+                sum(
+                    (
+                        rate
+                        - median_rate
+                    ) ** 2
+                    for rate in rates
+                )
+                / max(
+                    1,
+                    len(rates),
+                )
+            )
+
+            # Spread positive improvement across multiple game categories.
+            positive_uplifts = [
+                max(
+                    0.0,
+                    row["uplift"],
+                )
+                for row in game_rows
+            ]
+            total_positive_uplift = sum(
+                positive_uplifts
+            )
+
+            concentration_penalty = 0.0
+            largest_positive_share = 0.0
+
+            if total_positive_uplift > 0:
+                shares = [
+                    value
+                    / total_positive_uplift
+                    for value
+                    in positive_uplifts
+                ]
+
+                largest_positive_share = max(
+                    shares
+                )
+                equal_share = (
+                    1.0
+                    / len(shares)
+                )
+
+                concentration_penalty += (
+                    sum(
+                        (
+                            share
+                            - equal_share
+                        ) ** 2
+                        for share in shares
+                    )
+                    * 1.8
+                )
+
+                # A single game should not provide nearly all of the benefit.
+                if largest_positive_share > 0.45:
+                    concentration_penalty += (
+                        (
+                            largest_positive_share
+                            - 0.45
+                        ) ** 2
+                        * 8.0
+                    )
+
+                # If the optimizer is increasing profit overall, try to make
+                # most active configurable games matter at least a little.
+                for share in shares:
+                    if share < 0.04:
+                        concentration_penalty += (
+                            (
+                                0.04
+                                - share
+                            ) ** 2
+                            * 3.0
+                        )
+
+            # Extra protection against one setting becoming absurd relative to
+            # the current game's result.
+            explosion_penalty = 0.0
+
+            for row in game_rows:
+                current_scale = max(
+                    100.0,
+                    abs(
+                        row["current_net"]
+                    ),
+                )
+                relative_uplift = (
+                    abs(
+                        row["uplift"]
+                    )
+                    / current_scale
+                )
+
+                if relative_uplift > 4.0:
+                    explosion_penalty += min(
+                        25.0,
+                        (
+                            relative_uplift
+                            - 4.0
+                        ) ** 2
+                        * 0.015,
+                    )
+
+            explosion_penalty /= max(
+                1,
+                game_count,
+            )
+
+            penalty = (
+                beneficial_penalty
+                + 0.75
+                * rate_spread_penalty
+                + concentration_penalty
+                + explosion_penalty
+            )
+
+            return {
+                "penalty": penalty,
+                "profitable_games": profitable_games,
+                "game_count": game_count,
+                "largest_positive_share": largest_positive_share,
+                "rows": game_rows,
+            }
 
         def optimizer_key(settings):
             values = [
@@ -2371,6 +2672,16 @@ class EconomyAnalyzer:
                 )
                 prediction_cache[key] = predictions
 
+            balance = balance_cache.get(
+                key
+            )
+
+            if balance is None:
+                balance = evaluate_game_balance(
+                    settings
+                )
+                balance_cache[key] = balance
+
             errors = []
             for group_name, target in targets.items():
                 scale = max(
@@ -2402,10 +2713,17 @@ class EconomyAnalyzer:
                     (current_value - base_value) / scale
                 ) ** 2
 
+            score = (
+                target_error
+                + 0.40
+                * balance["penalty"]
+                + 0.002
+                * change_penalty
+            )
+
             return (
                 predictions,
-                target_error
-                + 0.0001 * change_penalty,
+                score,
             )
 
         best_predictions, best_score = predictions_and_score(best)
@@ -2486,6 +2804,10 @@ class EconomyAnalyzer:
             for group_name, target in targets.items()
         ]
 
+        final_balance = evaluate_game_balance(
+            best
+        )
+
         return {
             "settings": best,
             "predictions": best_predictions,
@@ -2497,6 +2819,7 @@ class EconomyAnalyzer:
             ),
             "evaluations": evaluations,
             "context": context,
+            "game_balance": final_balance,
         }
 
     def build_reason_stats(self):
@@ -8725,8 +9048,8 @@ class EconomyViewer:
             text=(
                 "Choose one or more activity groups, enter how much you want an average member to gain or lose from games over 30 days, then let the program search for nearby settings. "
                 "You can select a group by clicking its checkbox or group name. Typing a target automatically selects that group. "
-                "Locked values are never changed. Targets apply to game profit only because this panel can only change game settings. "
-                "All activity groups use the same server-wide average game result, so a small group having an unusually lucky or unusual mix of games cannot distort the target search."
+                "All activity groups use the same server-wide average game result. The optimizer also tries to keep Blackjack, Cock Fight, Roulette, Slot Machine and Higher or Lower beneficial and relevant instead of making one game carry the whole economy. "
+                "Russian Roulette is intentionally excluded from that balancing goal and is not automatically changed. Locked values are never changed."
             ),
             bg=CARD,
             fg=MUTED,
@@ -9008,7 +9331,7 @@ class EconomyViewer:
         self.sim_optimizer_status_label = tk.Label(
             optimizer_inner,
             text=(
-                "The optimizer has not been run. Positive targets mean the average user should gain money; negative targets mean they should lose money."
+                "The optimizer has not been run. Positive targets mean the average user should gain money. It will also try to keep the normal configurable games broadly useful instead of concentrating all profit into one category. Russian Roulette is excluded."
             ),
             bg=CARD,
             fg=MUTED,
@@ -11072,10 +11395,44 @@ class EconomyViewer:
                         fg=MUTED,
                     )
 
+            game_balance = result.get(
+                "game_balance",
+                {},
+            )
+            profitable_games = int(
+                game_balance.get(
+                    "profitable_games",
+                    0,
+                )
+            )
+            balanced_game_count = int(
+                game_balance.get(
+                    "game_count",
+                    0,
+                )
+            )
+            largest_share = (
+                float(
+                    game_balance.get(
+                        "largest_positive_share",
+                        0.0,
+                    )
+                )
+                * 100.0
+            )
+
             self.sim_optimizer_status_label.config(
                 text=(
                     f"Finished after {result['evaluations']:,} setting checks. The average absolute miss across the selected targets is about {result['average_absolute_miss']:,.0f} per month. "
-                    "The search used the same server-wide average game result for every activity group and only changed the amount of activity between groups. Locked values were left exactly as entered. The optimizer chooses the closest combination it can find, so several targets may not be possible to hit exactly with one shared set of game settings. "
+                    f"{profitable_games} of {balanced_game_count} normal configurable games finish positive for players in the selected history under these settings. "
+                    + (
+                        f"The single largest game supplies about {largest_share:,.1f}% of the positive improvement. "
+                        if largest_share > 0
+                        else ""
+                    )
+                    + "The optimizer deliberately spreads usefulness across Blackjack, Cock Fight, Roulette, Slot Machine and Higher or Lower instead of letting one category become the only viable option. "
+                    "Russian Roulette is intentionally excluded from that goal and is never automatically tuned. "
+                    "Locked values were left exactly as entered. The search still prioritizes your selected monthly activity-group targets, so it may not be mathematically possible to make every game positive while also hitting every target exactly. "
                     "Blackjack deck count is not auto-tuned because this program does not claim an exact profit change from deck count alone, and Animal Race has no normal global min/max bet setting to tune."
                 )
             )
