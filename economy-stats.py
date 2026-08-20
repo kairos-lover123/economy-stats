@@ -4,6 +4,7 @@ import re
 import csv
 import math
 import statistics
+import copy
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from collections import defaultdict
@@ -170,6 +171,20 @@ DEFAULT_SLOT_MULTIPLIER = 4.1
 DEFAULT_COCKFIGHT_START = 55.0
 DEFAULT_COCKFIGHT_MAX = 99.0
 DEFAULT_CHICKEN_PRICE = 20.0
+
+ACTIVITY_GROUP_NAMES = [
+    "Very Casual",
+    "Casual",
+    "Regular",
+    "Active",
+    "Very Active",
+]
+
+ACTIVITY_GROUP_BASIS_OPTIONS = [
+    "Combined activity",
+    "Estimated active hours",
+    "Transactions",
+]
 
 
 def parse_number(value):
@@ -1677,6 +1692,702 @@ class EconomyAnalyzer:
         )
 
         self.user_stats = rows
+
+    def estimate_game_rounds(
+        self,
+        game,
+        txs,
+        current_slot_multiplier=DEFAULT_SLOT_MULTIPLIER,
+    ):
+        bets = self.infer_game_bets(
+            game,
+            txs,
+            current_slot_multiplier,
+        )
+
+        if bets:
+            return len(bets)
+
+        return sum(
+            1
+            for tx in txs
+            if (
+                not tx.get("is_chicken_purchase", False)
+                and not (
+                    game == "animal race"
+                    and is_animal_race_purchase(
+                        tx["original_reason"]
+                    )
+                )
+            )
+        )
+
+    def get_activity_groups(
+        self,
+        basis="Combined activity",
+    ):
+        if basis not in ACTIVITY_GROUP_BASIS_OPTIONS:
+            basis = "Combined activity"
+
+        if not self.user_stats:
+            return [], {
+                name: set()
+                for name in ACTIVITY_GROUP_NAMES
+            }
+
+        records = []
+
+        for row in self.user_stats:
+            records.append(
+                {
+                    "user_id": str(row["User ID"]),
+                    "active_hours": float(row["Est. Active Hrs"]),
+                    "transactions": int(row["Transactions"]),
+                    "active_days": int(row["Active Days"]),
+                    "net": float(row["Net Profit"]),
+                }
+            )
+
+        def average_tie_percentiles(values):
+            indexed = sorted(
+                enumerate(values),
+                key=lambda item: item[1],
+            )
+            result = [0.0] * len(values)
+            n = len(values)
+            i = 0
+
+            while i < n:
+                j = i + 1
+                while (
+                    j < n
+                    and indexed[j][1] == indexed[i][1]
+                ):
+                    j += 1
+
+                average_rank = (i + j - 1) / 2
+                percentile = (
+                    average_rank / max(1, n - 1)
+                    if n > 1
+                    else 0.5
+                )
+
+                for k in range(i, j):
+                    result[indexed[k][0]] = percentile
+
+                i = j
+
+            return result
+
+        hour_percentiles = average_tie_percentiles(
+            [row["active_hours"] for row in records]
+        )
+        tx_percentiles = average_tie_percentiles(
+            [row["transactions"] for row in records]
+        )
+
+        for index, row in enumerate(records):
+            if basis == "Estimated active hours":
+                row["activity_score"] = hour_percentiles[index]
+            elif basis == "Transactions":
+                row["activity_score"] = tx_percentiles[index]
+            else:
+                row["activity_score"] = (
+                    hour_percentiles[index]
+                    + tx_percentiles[index]
+                ) / 2
+
+        records.sort(
+            key=lambda row: (
+                row["activity_score"],
+                row["active_hours"],
+                row["transactions"],
+                row["active_days"],
+                row["user_id"],
+            )
+        )
+
+        members = {
+            name: set()
+            for name in ACTIVITY_GROUP_NAMES
+        }
+        record_by_user = {}
+        total_users = len(records)
+
+        for rank, row in enumerate(records):
+            group_index = min(
+                len(ACTIVITY_GROUP_NAMES) - 1,
+                int(
+                    rank
+                    * len(ACTIVITY_GROUP_NAMES)
+                    / max(1, total_users)
+                ),
+            )
+            group_name = ACTIVITY_GROUP_NAMES[group_index]
+            row["group"] = group_name
+            row["rank_percent"] = (
+                (rank + 1) / total_users * 100
+            )
+            members[group_name].add(row["user_id"])
+            record_by_user[row["user_id"]] = row
+
+        txs_by_user = defaultdict(list)
+        for tx in self.transactions:
+            txs_by_user[str(tx["user_id"])].append(tx)
+
+        factor24 = self.get_24h_factor()
+        factor30 = self.get_30_day_factor()
+        stats = []
+
+        for group_name in ACTIVITY_GROUP_NAMES:
+            group_users = members[group_name]
+            group_records = [
+                record_by_user[user_id]
+                for user_id in group_users
+                if user_id in record_by_user
+            ]
+
+            if not group_records:
+                stats.append(
+                    {
+                        "Group": group_name,
+                        "Members": 0,
+                        "Avg Active Hrs": 0,
+                        "Avg Transactions": 0,
+                        "Avg Active Days": 0,
+                        "Avg 24h Net": 0,
+                        "Avg 30d Net": 0,
+                        "Avg 24h Game Net": 0,
+                        "Avg 30d Game Net": 0,
+                        "Avg Games / 24h": 0,
+                        "Most Played Game": "None",
+                        "Game Mix": "No game activity",
+                    }
+                )
+                continue
+
+            group_game_net = 0.0
+            game_rounds = defaultdict(float)
+
+            for user_id in group_users:
+                user_txs = txs_by_user.get(user_id, [])
+                for game in GAME_ORDER:
+                    game_txs = [
+                        tx
+                        for tx in user_txs
+                        if game_from_reason(
+                            tx["original_reason"]
+                        ) == game
+                    ]
+                    if not game_txs:
+                        continue
+
+                    group_game_net += sum(
+                        tx["total"]
+                        for tx in game_txs
+                    )
+                    game_rounds[game] += self.estimate_game_rounds(
+                        game,
+                        game_txs,
+                    )
+
+            member_count = len(group_records)
+            total_rounds = sum(game_rounds.values())
+            average_net = statistics.mean(
+                row["net"]
+                for row in group_records
+            )
+            average_hours = statistics.mean(
+                row["active_hours"]
+                for row in group_records
+            )
+            average_transactions = statistics.mean(
+                row["transactions"]
+                for row in group_records
+            )
+            average_active_days = statistics.mean(
+                row["active_days"]
+                for row in group_records
+            )
+
+            if game_rounds:
+                ordered_games = sorted(
+                    game_rounds.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )
+                most_played = GAME_DISPLAY[ordered_games[0][0]]
+                mix_parts = []
+                for game, rounds in ordered_games[:3]:
+                    share = (
+                        rounds / total_rounds * 100
+                        if total_rounds > 0
+                        else 0
+                    )
+                    mix_parts.append(
+                        f"{GAME_DISPLAY[game]} {share:.1f}%"
+                    )
+                game_mix = ", ".join(mix_parts)
+            else:
+                most_played = "None"
+                game_mix = "No game activity"
+
+            stats.append(
+                {
+                    "Group": group_name,
+                    "Members": member_count,
+                    "Avg Active Hrs": average_hours,
+                    "Avg Transactions": average_transactions,
+                    "Avg Active Days": average_active_days,
+                    "Avg 24h Net": average_net * factor24,
+                    "Avg 30d Net": average_net * factor30,
+                    "Avg 24h Game Net": (
+                        group_game_net
+                        * factor24
+                        / member_count
+                    ),
+                    "Avg 30d Game Net": (
+                        group_game_net
+                        * factor30
+                        / member_count
+                    ),
+                    "Avg Games / 24h": (
+                        total_rounds
+                        * factor24
+                        / member_count
+                    ),
+                    "Most Played Game": most_played,
+                    "Game Mix": game_mix,
+                }
+            )
+
+        return stats, members
+
+    def prepare_activity_optimizer_context(
+        self,
+        basis="Combined activity",
+    ):
+        _, members = self.get_activity_groups(basis)
+
+        user_to_group = {}
+        for group_name, user_ids in members.items():
+            for user_id in user_ids:
+                user_to_group[str(user_id)] = group_name
+
+        group_game_txs = {
+            group_name: {
+                game: []
+                for game in GAME_ORDER
+            }
+            for group_name in ACTIVITY_GROUP_NAMES
+        }
+        global_game_txs = {
+            game: []
+            for game in GAME_ORDER
+        }
+
+        for tx in self.transactions:
+            game = game_from_reason(
+                tx["original_reason"]
+            )
+            if game not in GAME_ORDER:
+                continue
+
+            global_game_txs[game].append(tx)
+            group_name = user_to_group.get(
+                str(tx["user_id"])
+            )
+            if group_name is not None:
+                group_game_txs[group_name][game].append(tx)
+
+        group_rounds = {}
+        for group_name in ACTIVITY_GROUP_NAMES:
+            group_rounds[group_name] = sum(
+                self.estimate_game_rounds(
+                    game,
+                    group_game_txs[group_name][game],
+                )
+                for game in GAME_ORDER
+            )
+
+        return {
+            "members": members,
+            "group_game_txs": group_game_txs,
+            "global_game_txs": global_game_txs,
+            "group_rounds": group_rounds,
+        }
+
+    def evaluate_activity_group_monthly(
+        self,
+        settings,
+        context,
+        use_actual_game_mix=True,
+    ):
+        factor30 = self.get_30_day_factor()
+        predictions = {}
+
+        if use_actual_game_mix:
+            for group_name in ACTIVITY_GROUP_NAMES:
+                member_count = len(
+                    context["members"].get(
+                        group_name,
+                        set(),
+                    )
+                )
+                if member_count <= 0:
+                    predictions[group_name] = 0.0
+                    continue
+
+                proposed_net = 0.0
+                for game in GAME_ORDER:
+                    txs = context["group_game_txs"][group_name][game]
+                    if not txs:
+                        continue
+                    result = self.simulate_game(
+                        game,
+                        txs,
+                        settings,
+                    )
+                    proposed_net += result["proposed_net"]
+
+                predictions[group_name] = (
+                    proposed_net
+                    * factor30
+                    / member_count
+                )
+
+            return predictions
+
+        global_net = 0.0
+        global_rounds = 0.0
+        for game in GAME_ORDER:
+            txs = context["global_game_txs"][game]
+            if not txs:
+                continue
+            result = self.simulate_game(
+                game,
+                txs,
+                settings,
+            )
+            global_net += result["proposed_net"]
+            global_rounds += result["proposed_rounds"]
+
+        average_net_per_round = (
+            global_net / global_rounds
+            if global_rounds > 0
+            else 0.0
+        )
+        activity_scale = (
+            settings["proposed_games_per_5m"]
+            / max(
+                0.000001,
+                settings["current_games_per_5m"],
+            )
+        )
+
+        for group_name in ACTIVITY_GROUP_NAMES:
+            member_count = len(
+                context["members"].get(
+                    group_name,
+                    set(),
+                )
+            )
+            if member_count <= 0:
+                predictions[group_name] = 0.0
+                continue
+
+            proposed_rounds = (
+                context["group_rounds"].get(
+                    group_name,
+                    0.0,
+                )
+                * activity_scale
+            )
+            predictions[group_name] = (
+                average_net_per_round
+                * proposed_rounds
+                * factor30
+                / member_count
+            )
+
+        return predictions
+
+    def optimize_activity_targets(
+        self,
+        base_settings,
+        targets,
+        locked_keys,
+        basis="Combined activity",
+        use_actual_game_mix=True,
+    ):
+        if not targets:
+            raise ValueError(
+                "Select at least one activity group and enter a monthly target."
+            )
+
+        context = self.prepare_activity_optimizer_context(
+            basis
+        )
+
+        for group_name in targets:
+            if not context["members"].get(group_name):
+                raise ValueError(
+                    f"{group_name} has no users in the selected data."
+                )
+
+        best = copy.deepcopy(base_settings)
+        base = copy.deepcopy(base_settings)
+
+        specs = []
+
+        if "proposed_games_per_5m" not in locked_keys:
+            specs.append(
+                {
+                    "key": "proposed_games_per_5m",
+                    "kind": "usage",
+                    "min": 1.0,
+                    "max": 10.0,
+                }
+            )
+
+        for game in BET_LIMIT_GAMES:
+            for field in ("min", "max"):
+                lock_key = f"{game}:proposed_{field}"
+                if lock_key in locked_keys:
+                    continue
+                specs.append(
+                    {
+                        "key": lock_key,
+                        "kind": "bet",
+                        "game": game,
+                        "field": field,
+                        "min": 1.0,
+                        "max": 100000.0,
+                    }
+                )
+
+        extra_specs = [
+            (
+                "proposed_slot_symbols",
+                "slots",
+                2.0,
+                8.0,
+            ),
+            (
+                "proposed_slot_multiplier",
+                "multiplier",
+                0.1,
+                20.0,
+            ),
+            (
+                "proposed_cockfight_start",
+                "chance",
+                1.0,
+                99.0,
+            ),
+            (
+                "proposed_cockfight_max",
+                "chance",
+                1.0,
+                99.0,
+            ),
+            (
+                "proposed_chicken_price",
+                "price",
+                0.0,
+                10000.0,
+            ),
+        ]
+
+        for key, kind, lower, upper in extra_specs:
+            if key not in locked_keys:
+                specs.append(
+                    {
+                        "key": key,
+                        "kind": kind,
+                        "min": lower,
+                        "max": upper,
+                    }
+                )
+
+        if not specs:
+            raise ValueError(
+                "Every value the optimizer can change is locked. Unlock at least one value."
+            )
+
+        def get_value(settings, spec):
+            if spec["kind"] == "bet":
+                return settings["games"][spec["game"]]["proposed"][spec["field"]]
+            return settings[spec["key"]]
+
+        def set_value(settings, spec, value):
+            value = max(
+                spec["min"],
+                min(spec["max"], value),
+            )
+
+            if spec["kind"] in {"usage", "slots"}:
+                value = float(round(value))
+
+            if spec["kind"] == "bet":
+                value = float(round(value / 5.0) * 5.0)
+                value = max(spec["min"], value)
+                settings["games"][spec["game"]]["proposed"][spec["field"]] = value
+            elif spec["kind"] == "slots":
+                settings[spec["key"]] = int(value)
+            elif spec["kind"] == "usage":
+                settings[spec["key"]] = float(value)
+            else:
+                settings[spec["key"]] = float(value)
+
+        def valid(settings):
+            for game in BET_LIMIT_GAMES:
+                proposed = settings["games"][game]["proposed"]
+                if proposed["max"] < proposed["min"]:
+                    return False
+
+            if (
+                settings["proposed_cockfight_start"]
+                > settings["proposed_cockfight_max"]
+            ):
+                return False
+
+            return True
+
+        def predictions_and_score(settings):
+            predictions = self.evaluate_activity_group_monthly(
+                settings,
+                context,
+                use_actual_game_mix=use_actual_game_mix,
+            )
+
+            errors = []
+            for group_name, target in targets.items():
+                scale = max(
+                    1000.0,
+                    abs(float(target)),
+                )
+                errors.append(
+                    (
+                        (
+                            predictions[group_name]
+                            - float(target)
+                        )
+                        / scale
+                    ) ** 2
+                )
+
+            target_error = (
+                sum(errors) / len(errors)
+                if errors
+                else 0.0
+            )
+
+            change_penalty = 0.0
+            for spec in specs:
+                current_value = get_value(settings, spec)
+                base_value = get_value(base, spec)
+                scale = max(1.0, abs(base_value))
+                change_penalty += (
+                    (current_value - base_value) / scale
+                ) ** 2
+
+            return (
+                predictions,
+                target_error
+                + 0.0001 * change_penalty,
+            )
+
+        best_predictions, best_score = predictions_and_score(best)
+        evaluations = 1
+
+        phase_fractions = [
+            0.50,
+            0.25,
+            0.10,
+            0.05,
+            0.02,
+        ]
+
+        for phase_index, fraction in enumerate(phase_fractions):
+            improved_in_phase = True
+            passes = 0
+
+            while improved_in_phase and passes < 2:
+                improved_in_phase = False
+                passes += 1
+
+                for spec in specs:
+                    current_value = get_value(best, spec)
+
+                    if spec["kind"] == "usage":
+                        step = 2.0 if phase_index == 0 else 1.0
+                    elif spec["kind"] == "slots":
+                        step = 1.0
+                    elif spec["kind"] == "multiplier":
+                        step = max(
+                            0.05,
+                            [1.0, 0.5, 0.25, 0.10, 0.05][phase_index],
+                        )
+                    elif spec["kind"] == "chance":
+                        step = [10.0, 5.0, 2.0, 1.0, 0.5][phase_index]
+                    elif spec["kind"] == "price":
+                        step = max(
+                            1.0,
+                            abs(current_value) * fraction,
+                            5.0,
+                        )
+                    else:
+                        step = max(
+                            5.0,
+                            abs(current_value) * fraction,
+                        )
+
+                    candidates = [
+                        current_value - step,
+                        current_value + step,
+                    ]
+
+                    for candidate_value in candidates:
+                        candidate = copy.deepcopy(best)
+                        set_value(
+                            candidate,
+                            spec,
+                            candidate_value,
+                        )
+
+                        if not valid(candidate):
+                            continue
+
+                        predictions, score = predictions_and_score(candidate)
+                        evaluations += 1
+
+                        if score + 1e-12 < best_score:
+                            best = candidate
+                            best_score = score
+                            best_predictions = predictions
+                            improved_in_phase = True
+
+        absolute_misses = [
+            abs(
+                best_predictions[group_name]
+                - float(target)
+            )
+            for group_name, target in targets.items()
+        ]
+
+        return {
+            "settings": best,
+            "predictions": best_predictions,
+            "score": best_score,
+            "average_absolute_miss": (
+                statistics.mean(absolute_misses)
+                if absolute_misses
+                else 0.0
+            ),
+            "evaluations": evaluations,
+            "context": context,
+        }
 
     def build_reason_stats(self):
         grouped = defaultdict(list)
@@ -4619,6 +5330,9 @@ class DataTable(
             "Reason",
             "Original Reason",
             "Top Income Source",
+            "Group",
+            "Most Played Game",
+            "Game Mix",
             "User ID",
             "Timestamp",
             "First Seen",
@@ -4655,6 +5369,7 @@ class DataTable(
                 "Original Reason",
                 "Top Income Source",
                 "Statistic",
+                "Game Mix",
             }:
                 width = 240
 
@@ -5129,6 +5844,11 @@ class EconomyViewer:
         self.nav_buttons = {}
 
         self.sim_vars = {}
+        self.sim_lock_vars = {}
+        self.sim_target_enabled_vars = {}
+        self.sim_target_value_vars = {}
+        self.sim_target_current_labels = {}
+        self.sim_target_result_labels = {}
 
         self.last_sim_settings = (
             None
@@ -5217,6 +5937,48 @@ class EconomyViewer:
         except Exception:
             slot_symbols = ""
 
+        sim_lock_values = {
+            key: var.get()
+            for key, var in getattr(
+                self,
+                "sim_lock_vars",
+                {},
+            ).items()
+        }
+
+        sim_target_enabled_values = {
+            key: var.get()
+            for key, var in getattr(
+                self,
+                "sim_target_enabled_vars",
+                {},
+            ).items()
+        }
+
+        sim_target_values = {
+            key: var.get()
+            for key, var in getattr(
+                self,
+                "sim_target_value_vars",
+                {},
+            ).items()
+        }
+
+        try:
+            optimizer_basis = self.sim_optimizer_basis_dropdown.get()
+        except Exception:
+            optimizer_basis = "Combined activity"
+
+        try:
+            use_group_game_mix = self.sim_use_group_game_mix_var.get()
+        except Exception:
+            use_group_game_mix = True
+
+        try:
+            activity_group_basis = self.activity_group_basis_dropdown.get()
+        except Exception:
+            activity_group_basis = "Combined activity"
+
         had_simulation = (
             self.last_sim_settings is not None
             and not self.sim_dirty
@@ -5234,6 +5996,11 @@ class EconomyViewer:
         self.nav_buttons = {}
         self.page_explanation_cards = {}
         self.sim_vars = {}
+        self.sim_lock_vars = {}
+        self.sim_target_enabled_vars = {}
+        self.sim_target_value_vars = {}
+        self.sim_target_current_labels = {}
+        self.sim_target_result_labels = {}
         self.last_sim_settings = None
         self.sim_dirty = True
 
@@ -5329,6 +6096,33 @@ class EconomyViewer:
             self.slot_command_symbols_var.set(
                 slot_symbols
             )
+
+            for key, value in sim_lock_values.items():
+                if key in self.sim_lock_vars:
+                    self.sim_lock_vars[key].set(value)
+
+            for key, value in sim_target_enabled_values.items():
+                if key in self.sim_target_enabled_vars:
+                    self.sim_target_enabled_vars[key].set(value)
+
+            for key, value in sim_target_values.items():
+                if key in self.sim_target_value_vars:
+                    self.sim_target_value_vars[key].set(value)
+
+            try:
+                self.sim_optimizer_basis_dropdown.set(
+                    optimizer_basis
+                )
+                self.sim_use_group_game_mix_var.set(
+                    use_group_game_mix
+                )
+                self.activity_group_basis_dropdown.set(
+                    activity_group_basis
+                )
+                self.refresh_activity_groups()
+                self.refresh_activity_target_rows()
+            except Exception:
+                pass
 
             if had_simulation:
                 self.run_simulator()
@@ -5576,6 +6370,11 @@ class EconomyViewer:
             (
                 "user_breakdown",
                 "User Breakdown",
+            ),
+
+            (
+                "activity_groups",
+                "Activity Groups",
             ),
 
             (
@@ -6220,6 +7019,10 @@ class EconomyViewer:
         ] = self.build_user_breakdown_page()
 
         self.page_frames[
+            "activity_groups"
+        ] = self.build_activity_groups_page()
+
+        self.page_frames[
             "sources"
         ] = self.build_table_page(
             "Income Sources",
@@ -6602,6 +7405,151 @@ class EconomyViewer:
             entry,
         )
 
+    def build_activity_groups_page(self):
+        page = self.new_page()
+
+        self.make_page_header(
+            page,
+            "Activity Groups",
+            "Group users by how intensely they use the economy and compare what a typical member earns.",
+        )
+
+        self.activity_group_help_card = self.make_help_card(
+            page,
+            (
+                "Users are split into five rank-based activity groups. Combined activity uses both estimated active hours and number of balance changes. "
+                "You can also rank only by active hours or only by transactions. The groups adapt to the users in the currently selected database window."
+            ),
+            height=130,
+        )
+
+        controls = RoundedPanel(
+            page,
+            height=100,
+            padding=16,
+            fill=INFO_BG,
+            outline=BORDER,
+        )
+        controls.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        row = controls.inner
+
+        tk.Label(
+            row,
+            text="Group users by",
+            bg=INFO_BG,
+            fg=MUTED,
+        ).pack(
+            side=tk.LEFT,
+            padx=(0, 8),
+        )
+
+        self.activity_group_basis_dropdown = SingleSelectMenuButton(
+            row,
+            options=ACTIVITY_GROUP_BASIS_OPTIONS,
+            value="Combined activity",
+            width=210,
+        )
+        self.activity_group_basis_dropdown.pack(
+            side=tk.LEFT,
+            padx=(0, 12),
+        )
+
+        RoundedButton(
+            row,
+            "Refresh Groups",
+            self.refresh_activity_groups,
+            width=120,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        ).pack(
+            side=tk.LEFT,
+        )
+
+        panel = RoundedPanel(
+            page,
+            height=650,
+            padding=18,
+        )
+        panel.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        self.activity_group_table = DataTable(
+            panel.inner,
+            height=14,
+        )
+        self.activity_group_table.pack(
+            fill=tk.BOTH,
+            expand=True,
+        )
+
+        return page
+
+    def refresh_activity_groups(self):
+        if not self.analyzer.transactions:
+            return
+
+        try:
+            basis = self.activity_group_basis_dropdown.get()
+        except Exception:
+            basis = "Combined activity"
+
+        rows, members = self.analyzer.get_activity_groups(
+            basis
+        )
+
+        self.activity_group_table.set_data(rows)
+
+        if not rows:
+            self.activity_group_help_card.set_text(
+                "There are no users in the current selection."
+            )
+            return
+
+        nonempty = [
+            row
+            for row in rows
+            if row["Members"] > 0
+        ]
+
+        if not nonempty:
+            return
+
+        quietest = nonempty[0]
+        busiest = nonempty[-1]
+
+        def money_words(value, period):
+            if value > 0:
+                return f"gain about {value:,.0f} over {period}"
+            if value < 0:
+                return f"lose about {abs(value):,.0f} over {period}"
+            return f"finish about even over {period}"
+
+        self.activity_group_help_card.set_text(
+            (
+                f"The current grouping uses {basis.lower()}. Users are ranked against each other and divided into five bands, so the cutoffs automatically adapt when the selected dates or filters change. "
+                "'Very Casual' is the lowest activity band and 'Very Active' is the highest. This is a relative ranking, not a fixed number of hours that will be the same in every database.\n\n"
+                f"A typical {quietest['Group']} member has about {quietest['Avg Active Hrs']:,.2f} estimated active hours and {quietest['Avg Transactions']:,.1f} balance changes during the selected window. "
+                f"At the same overall pace they would {money_words(quietest['Avg 24h Net'], '24 hours')} and {money_words(quietest['Avg 30d Net'], '30 days')}. "
+                f"Looking only at the games that the simulator can change, their 30-day game result is {quietest['Avg 30d Game Net']:+,.0f}. Their most-played game is {quietest['Most Played Game']}.\n\n"
+                f"A typical {busiest['Group']} member has about {busiest['Avg Active Hrs']:,.2f} estimated active hours and {busiest['Avg Transactions']:,.1f} balance changes during the selected window. "
+                f"At the same overall pace they would {money_words(busiest['Avg 24h Net'], '24 hours')} and {money_words(busiest['Avg 30d Net'], '30 days')}. "
+                f"Their 30-day game result is {busiest['Avg 30d Game Net']:+,.0f}, and their most-played game is {busiest['Most Played Game']}.\n\n"
+                "The overall 24-hour and 30-day columns include every included economy reason. The game-only columns include only Blackjack, Cock Fight, Roulette, Russian Roulette, Slot Machine, Higher or Lower and Animal Race, because those are the parts the Game Simulator can evaluate."
+            )
+        )
+
+        try:
+            self.refresh_activity_target_rows()
+        except Exception:
+            pass
+
     def build_simulator_page(self):
         page = self.new_page()
 
@@ -6715,6 +7663,27 @@ class EconomyViewer:
         )
 
         entry.pack(
+            side=tk.LEFT,
+            padx=(0, 14),
+        )
+
+        self.sim_lock_vars[
+            "proposed_games_per_5m"
+        ] = tk.BooleanVar(value=False)
+
+        tk.Checkbutton(
+            global_row,
+            text="Lock activity",
+            variable=self.sim_lock_vars[
+                "proposed_games_per_5m"
+            ],
+            bg=CARD,
+            fg=MUTED,
+            selectcolor=DEEP_BG,
+            activebackground=CARD,
+            activeforeground=TEXT,
+            highlightthickness=0,
+        ).pack(
             side=tk.LEFT
         )
 
@@ -6884,6 +7853,39 @@ class EconomyViewer:
                 pady=4,
             )
 
+            lock_box = tk.Frame(
+                extra,
+                bg=CARD,
+            )
+            lock_box.pack(
+                side=tk.RIGHT,
+                padx=(14, 0),
+            )
+
+            for lock_field, lock_label in (
+                ("min", "Lock min"),
+                ("max", "Lock max"),
+            ):
+                lock_key = f"{game}:proposed_{lock_field}"
+                self.sim_lock_vars[lock_key] = tk.BooleanVar(
+                    value=False
+                )
+                tk.Checkbutton(
+                    lock_box,
+                    text=lock_label,
+                    variable=self.sim_lock_vars[lock_key],
+                    bg=CARD,
+                    fg=MUTED,
+                    selectcolor=DEEP_BG,
+                    activebackground=CARD,
+                    activeforeground=TEXT,
+                    highlightthickness=0,
+                    font=("Segoe UI", 8),
+                ).pack(
+                    side=tk.LEFT,
+                    padx=(0, 4),
+                )
+
             if game == "blackjack":
                 tk.Label(
                     extra,
@@ -7034,8 +8036,32 @@ class EconomyViewer:
                 )
 
                 entry.pack(
-                    side=tk.LEFT
+                    side=tk.LEFT,
+                    padx=(0, 6),
                 )
+
+                for lock_key, lock_label in (
+                    ("proposed_slot_symbols", "Lock symbols"),
+                    ("proposed_slot_multiplier", "Lock multiplier"),
+                ):
+                    self.sim_lock_vars[lock_key] = tk.BooleanVar(
+                        value=False
+                    )
+                    tk.Checkbutton(
+                        extra,
+                        text=lock_label,
+                        variable=self.sim_lock_vars[lock_key],
+                        bg=CARD,
+                        fg=MUTED,
+                        selectcolor=DEEP_BG,
+                        activebackground=CARD,
+                        activeforeground=TEXT,
+                        highlightthickness=0,
+                        font=("Segoe UI", 8),
+                    ).pack(
+                        side=tk.LEFT,
+                        padx=(0, 4),
+                    )
 
             elif game == "cockfight":
                 tk.Label(
@@ -7136,8 +8162,32 @@ class EconomyViewer:
                 )
 
                 entry.pack(
-                    side=tk.LEFT
+                    side=tk.LEFT,
+                    padx=(0, 6),
                 )
+
+                for lock_key, lock_label in (
+                    ("proposed_cockfight_start", "Lock start"),
+                    ("proposed_cockfight_max", "Lock max %"),
+                ):
+                    self.sim_lock_vars[lock_key] = tk.BooleanVar(
+                        value=False
+                    )
+                    tk.Checkbutton(
+                        extra,
+                        text=lock_label,
+                        variable=self.sim_lock_vars[lock_key],
+                        bg=CARD,
+                        fg=MUTED,
+                        selectcolor=DEEP_BG,
+                        activebackground=CARD,
+                        activeforeground=TEXT,
+                        highlightthickness=0,
+                        font=("Segoe UI", 8),
+                    ).pack(
+                        side=tk.LEFT,
+                        padx=(0, 4),
+                    )
 
             else:
                 tk.Label(
@@ -7244,6 +8294,27 @@ class EconomyViewer:
         )
 
         entry.pack(
+            side=tk.LEFT,
+            padx=(0, 12),
+        )
+
+        self.sim_lock_vars[
+            "proposed_chicken_price"
+        ] = tk.BooleanVar(value=False)
+
+        tk.Checkbutton(
+            chicken_row,
+            text="Lock chicken price",
+            variable=self.sim_lock_vars[
+                "proposed_chicken_price"
+            ],
+            bg=CARD,
+            fg=MUTED,
+            selectcolor=DEEP_BG,
+            activebackground=CARD,
+            activeforeground=TEXT,
+            highlightthickness=0,
+        ).pack(
             side=tk.LEFT
         )
 
@@ -7322,6 +8393,294 @@ class EconomyViewer:
             side=tk.LEFT,
             fill=tk.X,
             expand=True,
+        )
+
+        optimizer_panel = RoundedPanel(
+            page,
+            height=650,
+            padding=18,
+        )
+        optimizer_panel.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        optimizer_inner = optimizer_panel.inner
+
+        tk.Label(
+            optimizer_inner,
+            text="Activity group target optimizer",
+            bg=CARD,
+            fg=TEXT,
+            font=(
+                "Segoe UI Semibold",
+                11,
+            ),
+        ).pack(
+            anchor="w"
+        )
+
+        tk.Label(
+            optimizer_inner,
+            text=(
+                "Choose one or more activity groups, enter how much you want an average member to gain or lose from games over 30 days, then let the program search for nearby settings. "
+                "Locked values are never changed. Targets apply to game profit only because this panel can only change game settings."
+            ),
+            bg=CARD,
+            fg=MUTED,
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=1250,
+            font=(
+                "Segoe UI",
+                8,
+            ),
+        ).pack(
+            fill=tk.X,
+            anchor="w",
+            pady=(4, 12),
+        )
+
+        optimizer_options = tk.Frame(
+            optimizer_inner,
+            bg=CARD,
+        )
+        optimizer_options.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        tk.Label(
+            optimizer_options,
+            text="Group users by",
+            bg=CARD,
+            fg=MUTED,
+        ).pack(
+            side=tk.LEFT,
+            padx=(0, 8),
+        )
+
+        self.sim_optimizer_basis_dropdown = SingleSelectMenuButton(
+            optimizer_options,
+            options=ACTIVITY_GROUP_BASIS_OPTIONS,
+            value="Combined activity",
+            width=210,
+        )
+        self.sim_optimizer_basis_dropdown.pack(
+            side=tk.LEFT,
+            padx=(0, 16),
+        )
+
+        self.sim_use_group_game_mix_var = tk.BooleanVar(
+            value=True
+        )
+
+        tk.Checkbutton(
+            optimizer_options,
+            text="Use each activity group's actual game mix",
+            variable=self.sim_use_group_game_mix_var,
+            bg=CARD,
+            fg=TEXT,
+            selectcolor=DEEP_BG,
+            activebackground=CARD,
+            activeforeground=TEXT,
+            highlightthickness=0,
+        ).pack(
+            side=tk.LEFT,
+            padx=(0, 12),
+        )
+
+        RoundedButton(
+            optimizer_options,
+            "Refresh Groups",
+            self.refresh_activity_target_rows,
+            width=116,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        ).pack(
+            side=tk.LEFT,
+        )
+
+        target_header = tk.Frame(
+            optimizer_inner,
+            bg=CARD,
+        )
+        target_header.pack(
+            fill=tk.X,
+            pady=(0, 4),
+        )
+
+        header_items = [
+            ("Use", 7),
+            ("Activity group", 18),
+            ("Current simulated 30d", 22),
+            ("Target 30d", 18),
+            ("Optimizer result", 22),
+        ]
+        for label_text, width in header_items:
+            tk.Label(
+                target_header,
+                text=label_text,
+                width=width,
+                anchor="w",
+                bg=CARD,
+                fg=MUTED,
+                font=(
+                    "Segoe UI Semibold",
+                    8,
+                ),
+            ).pack(
+                side=tk.LEFT,
+                padx=(0, 8),
+            )
+
+        for group_name in ACTIVITY_GROUP_NAMES:
+            target_row = tk.Frame(
+                optimizer_inner,
+                bg=CARD,
+            )
+            target_row.pack(
+                fill=tk.X,
+                pady=3,
+            )
+
+            enabled_var = tk.BooleanVar(value=False)
+            target_var = tk.StringVar(value="")
+            self.sim_target_enabled_vars[group_name] = enabled_var
+            self.sim_target_value_vars[group_name] = target_var
+
+            tk.Checkbutton(
+                target_row,
+                variable=enabled_var,
+                bg=CARD,
+                selectcolor=DEEP_BG,
+                activebackground=CARD,
+                highlightthickness=0,
+                width=5,
+                anchor="w",
+            ).pack(
+                side=tk.LEFT,
+                padx=(0, 8),
+            )
+
+            tk.Label(
+                target_row,
+                text=group_name,
+                width=18,
+                anchor="w",
+                bg=CARD,
+                fg=TEXT,
+                font=(
+                    "Segoe UI Semibold",
+                    9,
+                ),
+            ).pack(
+                side=tk.LEFT,
+                padx=(0, 8),
+            )
+
+            current_label = tk.Label(
+                target_row,
+                text="Not calculated",
+                width=22,
+                anchor="w",
+                bg=CARD,
+                fg=MUTED,
+            )
+            current_label.pack(
+                side=tk.LEFT,
+                padx=(0, 8),
+            )
+            self.sim_target_current_labels[group_name] = current_label
+
+            target_entry = RoundedEntry(
+                target_row,
+                textvariable=target_var,
+                width=145,
+                height=32,
+            )
+            target_entry.pack(
+                side=tk.LEFT,
+                padx=(0, 16),
+            )
+
+            result_label = tk.Label(
+                target_row,
+                text="-",
+                width=28,
+                anchor="w",
+                bg=CARD,
+                fg=MUTED,
+            )
+            result_label.pack(
+                side=tk.LEFT,
+            )
+            self.sim_target_result_labels[group_name] = result_label
+
+        optimizer_buttons = tk.Frame(
+            optimizer_inner,
+            bg=CARD,
+        )
+        optimizer_buttons.pack(
+            fill=tk.X,
+            pady=(14, 6),
+        )
+
+        RoundedButton(
+            optimizer_buttons,
+            "Find Settings",
+            self.optimize_simulator_targets,
+            width=120,
+        ).pack(
+            side=tk.LEFT,
+            padx=(0, 10),
+        )
+
+        RoundedButton(
+            optimizer_buttons,
+            "Unlock All",
+            lambda: self.set_all_sim_locks(False),
+            width=104,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        ).pack(
+            side=tk.LEFT,
+            padx=(0, 10),
+        )
+
+        RoundedButton(
+            optimizer_buttons,
+            "Lock All",
+            lambda: self.set_all_sim_locks(True),
+            width=96,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        ).pack(
+            side=tk.LEFT,
+        )
+
+        self.sim_optimizer_status_label = tk.Label(
+            optimizer_inner,
+            text=(
+                "The optimizer has not been run. Positive targets mean the average user should gain money; negative targets mean they should lose money."
+            ),
+            bg=CARD,
+            fg=MUTED,
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=1250,
+            font=(
+                "Segoe UI",
+                8,
+            ),
+        )
+        self.sim_optimizer_status_label.pack(
+            fill=tk.X,
+            anchor="w",
+            pady=(4, 0),
         )
 
         action_panel = RoundedPanel(
@@ -8785,6 +10144,12 @@ class EconomyViewer:
                     f"Largest single removal: {transaction_sentence(largest_loss)}"
                 )
             )
+        try:
+            self.refresh_activity_groups()
+            self.refresh_activity_target_rows()
+        except Exception:
+            pass
+
     def update_kpis(self):
         txs = (
             self.analyzer
@@ -9130,6 +10495,228 @@ class EconomyViewer:
                 "money received is what that source paid them, money spent/lost is what it took, the final change is the difference, and the two percentage columns show how much of all their received money or all their lost money came from that source."
             )
         )
+    def set_all_sim_locks(
+        self,
+        value,
+    ):
+        for var in self.sim_lock_vars.values():
+            var.set(bool(value))
+
+    def get_locked_simulator_keys(self):
+        return {
+            key
+            for key, var in self.sim_lock_vars.items()
+            if var.get()
+        }
+
+    def refresh_activity_target_rows(self):
+        if not self.analyzer.transactions:
+            return
+
+        try:
+            settings = self.get_simulator_settings()
+        except Exception:
+            return
+
+        try:
+            basis = self.sim_optimizer_basis_dropdown.get()
+        except Exception:
+            basis = "Combined activity"
+
+        try:
+            use_actual_mix = self.sim_use_group_game_mix_var.get()
+        except Exception:
+            use_actual_mix = True
+
+        context = self.analyzer.prepare_activity_optimizer_context(
+            basis
+        )
+        predictions = self.analyzer.evaluate_activity_group_monthly(
+            settings,
+            context,
+            use_actual_game_mix=use_actual_mix,
+        )
+
+        for group_name in ACTIVITY_GROUP_NAMES:
+            member_count = len(
+                context["members"].get(
+                    group_name,
+                    set(),
+                )
+            )
+            value = predictions.get(group_name, 0.0)
+            label = self.sim_target_current_labels.get(
+                group_name
+            )
+            if label is not None:
+                if member_count > 0:
+                    label.config(
+                        text=f"{value:+,.0f} ({member_count} users)"
+                    )
+                else:
+                    label.config(
+                        text="No users"
+                    )
+
+            result_label = self.sim_target_result_labels.get(
+                group_name
+            )
+            if result_label is not None:
+                result_label.config(
+                    text="-"
+                )
+
+    def apply_optimizer_settings_to_ui(
+        self,
+        settings,
+    ):
+        self.sim_vars[
+            "proposed_games_per_5m"
+        ].set(
+            f"{settings['proposed_games_per_5m']:g}"
+        )
+
+        for game in BET_LIMIT_GAMES:
+            proposed = settings["games"][game]["proposed"]
+            self.sim_vars[
+                f"{game}:proposed_min"
+            ].set(
+                f"{proposed['min']:g}"
+            )
+            self.sim_vars[
+                f"{game}:proposed_max"
+            ].set(
+                f"{proposed['max']:g}"
+            )
+
+        self.sim_vars[
+            "proposed_slot_symbols"
+        ].set(
+            str(settings["proposed_slot_symbols"])
+        )
+        self.sim_vars[
+            "proposed_slot_multiplier"
+        ].set(
+            f"{settings['proposed_slot_multiplier']:g}"
+        )
+        self.sim_vars[
+            "proposed_cockfight_start"
+        ].set(
+            f"{settings['proposed_cockfight_start']:g}"
+        )
+        self.sim_vars[
+            "proposed_cockfight_max"
+        ].set(
+            f"{settings['proposed_cockfight_max']:g}"
+        )
+        self.sim_vars[
+            "proposed_chicken_price"
+        ].set(
+            f"{settings['proposed_chicken_price']:g}"
+        )
+
+    def optimize_simulator_targets(self):
+        if not self.analyzer.transactions:
+            return
+
+        try:
+            targets = {}
+
+            for group_name in ACTIVITY_GROUP_NAMES:
+                enabled = self.sim_target_enabled_vars[
+                    group_name
+                ].get()
+                if not enabled:
+                    continue
+
+                raw_value = self.sim_target_value_vars[
+                    group_name
+                ].get().strip()
+
+                if not raw_value:
+                    raise ValueError(
+                        f"Enter a 30-day target for {group_name}."
+                    )
+
+                targets[group_name] = parse_float(
+                    raw_value
+                )
+
+            if not targets:
+                raise ValueError(
+                    "Select at least one activity group and enter a monthly target."
+                )
+
+            settings = self.get_simulator_settings()
+            basis = self.sim_optimizer_basis_dropdown.get()
+            use_actual_mix = self.sim_use_group_game_mix_var.get()
+            locked_keys = self.get_locked_simulator_keys()
+
+            self.sim_optimizer_status_label.config(
+                text=(
+                    "Searching for settings. This can take a few seconds because the program repeatedly checks the selected activity groups against the history."
+                )
+            )
+            self.root.update_idletasks()
+
+            result = self.analyzer.optimize_activity_targets(
+                settings,
+                targets,
+                locked_keys,
+                basis=basis,
+                use_actual_game_mix=use_actual_mix,
+            )
+
+            self.apply_optimizer_settings_to_ui(
+                result["settings"]
+            )
+
+            for group_name in ACTIVITY_GROUP_NAMES:
+                result_label = self.sim_target_result_labels.get(
+                    group_name
+                )
+                if result_label is None:
+                    continue
+
+                if group_name in targets:
+                    predicted = result["predictions"][group_name]
+                    target = targets[group_name]
+                    miss = predicted - target
+                    result_label.config(
+                        text=(
+                            f"{predicted:+,.0f} | target {target:+,.0f} | miss {miss:+,.0f}"
+                        ),
+                        fg=TEXT,
+                    )
+                else:
+                    result_label.config(
+                        text="Not targeted",
+                        fg=MUTED,
+                    )
+
+            mix_words = (
+                "each group's actual game mix"
+                if use_actual_mix
+                else "the server-wide game mix with each group's activity level"
+            )
+
+            self.sim_optimizer_status_label.config(
+                text=(
+                    f"Finished after {result['evaluations']:,} setting checks. The average absolute miss across the selected targets is about {result['average_absolute_miss']:,.0f} per month. "
+                    f"The search used {mix_words}. Locked values were left exactly as entered. The optimizer chooses the closest combination it can find, so several targets may not be possible to hit exactly with one shared set of game settings. "
+                    "Blackjack deck count is not auto-tuned because this program does not claim an exact profit change from deck count alone, and Animal Race has no normal global min/max bet setting to tune."
+                )
+            )
+
+            self.mark_sim_dirty()
+            self.run_simulator()
+
+        except Exception as error:
+            messagebox.showerror(
+                "Target Optimizer Error",
+                str(error),
+            )
+
     def get_simulator_settings(
         self,
     ):
@@ -10191,6 +11778,9 @@ class EconomyViewer:
 
             "transactions":
                 self.transactions_table,
+
+            "activity_groups":
+                self.activity_group_table,
 
             "simulator":
                 self.sim_user_table,
