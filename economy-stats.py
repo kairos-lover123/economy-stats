@@ -10,6 +10,7 @@ from tkinter import ttk, messagebox, filedialog
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from functools import lru_cache
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "economy-stats.dht"
@@ -611,6 +612,7 @@ def scale_bet(
     )
 
 
+@lru_cache(maxsize=512)
 def effective_cockfight_win_rate(
     start_percent,
     max_percent,
@@ -757,6 +759,18 @@ class EconomyAnalyzer:
         self.analysis_end = None
 
         self.json_column = None
+
+        # Fast lookup indexes. These are rebuilt whenever filters are applied,
+        # so expensive pages and simulations do not repeatedly scan the entire
+        # transaction list.
+        self.transactions_by_user = {}
+        self.game_transactions = {
+            game: []
+            for game in GAME_ORDER
+        }
+        self.user_game_transactions = {}
+        self._simulation_base_cache = {}
+        self._normalized_bet_cache = {}
 
     def connect(self):
         db_path = Path(self.db_path)
@@ -1165,6 +1179,8 @@ class EconomyAnalyzer:
                 "the current filters."
             )
 
+        self.rebuild_indexes()
+
         self.build_summary()
         self.build_user_stats()
         self.build_reason_stats()
@@ -1218,17 +1234,56 @@ class EconomyAnalyzer:
             24 / hours
         )
 
+    def rebuild_indexes(self):
+        by_user = defaultdict(list)
+        by_game = {
+            game: []
+            for game in GAME_ORDER
+        }
+        by_user_game = defaultdict(
+            lambda: {
+                game: []
+                for game in GAME_ORDER
+            }
+        )
+
+        for tx in self.transactions:
+            user_id = str(
+                tx["user_id"]
+            )
+            by_user[user_id].append(tx)
+
+            game = game_from_reason(
+                tx["original_reason"]
+            )
+            tx["_game"] = game
+
+            if game in by_game:
+                by_game[game].append(tx)
+                by_user_game[user_id][game].append(tx)
+
+        self.transactions_by_user = dict(
+            by_user
+        )
+        self.game_transactions = by_game
+        self.user_game_transactions = {
+            user_id: dict(game_map)
+            for user_id, game_map
+            in by_user_game.items()
+        }
+
+        # Any filter change means cached simulation inputs are no longer valid.
+        self._simulation_base_cache.clear()
+        self._normalized_bet_cache.clear()
+
     def get_user_transactions(
         self,
         user_id,
     ):
-        return [
-            tx
-            for tx
-            in self.transactions
-            if tx["user_id"]
-            == user_id
-        ]
+        return self.transactions_by_user.get(
+            str(user_id),
+            [],
+        )
 
     def calculate_activity(
         self,
@@ -1870,15 +1925,19 @@ class EconomyAnalyzer:
             game_rounds = defaultdict(float)
 
             for user_id in group_users:
-                user_txs = txs_by_user.get(user_id, [])
+                user_games = (
+                    self.user_game_transactions
+                    .get(
+                        str(user_id),
+                        {},
+                    )
+                )
+
                 for game in GAME_ORDER:
-                    game_txs = [
-                        tx
-                        for tx in user_txs
-                        if game_from_reason(
-                            tx["original_reason"]
-                        ) == game
-                    ]
+                    game_txs = user_games.get(
+                        game,
+                        [],
+                    )
                     if not game_txs:
                         continue
 
@@ -1986,19 +2045,32 @@ class EconomyAnalyzer:
             for game in GAME_ORDER
         }
 
-        for tx in self.transactions:
-            game = game_from_reason(
-                tx["original_reason"]
+        for game in GAME_ORDER:
+            global_game_txs[game] = (
+                self.game_transactions.get(
+                    game,
+                    [],
+                )
             )
-            if game not in GAME_ORDER:
-                continue
 
-            global_game_txs[game].append(tx)
-            group_name = user_to_group.get(
-                str(tx["user_id"])
+        for user_id, group_name in user_to_group.items():
+            game_map = (
+                self.user_game_transactions
+                .get(
+                    str(user_id),
+                    {},
+                )
             )
-            if group_name is not None:
-                group_game_txs[group_name][game].append(tx)
+
+            for game in GAME_ORDER:
+                txs = game_map.get(
+                    game,
+                    [],
+                )
+                if txs:
+                    group_game_txs[
+                        group_name
+                    ][game].extend(txs)
 
         group_rounds = {}
         for group_name in ACTIVITY_GROUP_NAMES:
@@ -2254,12 +2326,68 @@ class EconomyAnalyzer:
 
             return True
 
+        prediction_cache = {}
+
+        def optimizer_key(settings):
+            values = [
+                float(
+                    settings[
+                        "proposed_games_per_5m"
+                    ]
+                ),
+                int(
+                    settings[
+                        "proposed_slot_symbols"
+                    ]
+                ),
+                float(
+                    settings[
+                        "proposed_slot_multiplier"
+                    ]
+                ),
+                float(
+                    settings[
+                        "proposed_cockfight_start"
+                    ]
+                ),
+                float(
+                    settings[
+                        "proposed_cockfight_max"
+                    ]
+                ),
+                float(
+                    settings[
+                        "proposed_chicken_price"
+                    ]
+                ),
+            ]
+
+            for game in BET_LIMIT_GAMES:
+                proposed = settings[
+                    "games"
+                ][game]["proposed"]
+                values.extend(
+                    [
+                        float(proposed["min"]),
+                        float(proposed["max"]),
+                    ]
+                )
+
+            return tuple(values)
+
         def predictions_and_score(settings):
-            predictions = self.evaluate_activity_group_monthly(
-                settings,
-                context,
-                use_actual_game_mix=use_actual_game_mix,
+            key = optimizer_key(settings)
+            predictions = prediction_cache.get(
+                key
             )
+
+            if predictions is None:
+                predictions = self.evaluate_activity_group_monthly(
+                    settings,
+                    context,
+                    use_actual_game_mix=use_actual_game_mix,
+                )
+                prediction_cache[key] = predictions
 
             errors = []
             for group_name, target in targets.items():
@@ -2639,29 +2767,23 @@ class EconomyAnalyzer:
         game,
         user_id=None,
     ):
-        rows = []
+        if user_id is None:
+            return self.game_transactions.get(
+                game,
+                [],
+            )
 
-        for tx in self.transactions:
-            if (
-                user_id is not None
-                and tx["user_id"]
-                != user_id
-            ):
-                continue
-
-            if (
-                game_from_reason(
-                    tx[
-                        "original_reason"
-                    ]
-                )
-                == game
-            ):
-                rows.append(
-                    tx
-                )
-
-        return rows
+        return (
+            self.user_game_transactions
+            .get(
+                str(user_id),
+                {},
+            )
+            .get(
+                game,
+                [],
+            )
+        )
 
     def infer_game_bets(
         self,
@@ -2783,6 +2905,175 @@ class EconomyAnalyzer:
             else DEFAULT_CHICKEN_PRICE
         )
 
+    def get_simulation_base(
+        self,
+        game,
+        txs,
+        current_slot_multiplier,
+    ):
+        cache_key = (
+            game,
+            id(txs),
+            float(current_slot_multiplier),
+        )
+
+        cached = self._simulation_base_cache.get(
+            cache_key
+        )
+        if cached is not None:
+            return cached
+
+        bets = self.infer_game_bets(
+            game,
+            txs,
+            current_slot_multiplier,
+        )
+
+        observed_net = sum(
+            tx["total"]
+            for tx in txs
+        )
+        observed_earned = sum(
+            tx["total"]
+            for tx in txs
+            if tx["total"] > 0
+        )
+        observed_lost = -sum(
+            tx["total"]
+            for tx in txs
+            if tx["total"] < 0
+        )
+
+        inferred_rounds = len(bets)
+        fallback_rounds = sum(
+            1
+            for tx in txs
+            if not tx.get(
+                "is_chicken_purchase",
+                False,
+            )
+        )
+        observed_rounds = (
+            inferred_rounds
+            if inferred_rounds
+            else fallback_rounds
+        )
+
+        result = {
+            "bets": bets,
+            "bet_count": len(bets),
+            "old_stake": sum(bets),
+            "observed_net": observed_net,
+            "observed_earned": observed_earned,
+            "observed_lost": observed_lost,
+            "observed_rounds": observed_rounds,
+        }
+
+        if game == "animal race":
+            purchase_net = 0.0
+            purchase_earned = 0.0
+            purchase_lost = 0.0
+            race_net = 0.0
+            race_earned = 0.0
+            race_lost = 0.0
+
+            for tx in txs:
+                amount = tx["total"]
+
+                if is_animal_race_purchase(
+                    tx["original_reason"]
+                ):
+                    purchase_net += amount
+                    if amount > 0:
+                        purchase_earned += amount
+                    elif amount < 0:
+                        purchase_lost += -amount
+                else:
+                    race_net += amount
+                    if amount > 0:
+                        race_earned += amount
+                    elif amount < 0:
+                        race_lost += -amount
+
+            result.update(
+                {
+                    "purchase_net": purchase_net,
+                    "purchase_earned": purchase_earned,
+                    "purchase_lost": purchase_lost,
+                    "race_net": race_net,
+                    "race_earned": race_earned,
+                    "race_lost": race_lost,
+                }
+            )
+
+        self._simulation_base_cache[
+            cache_key
+        ] = result
+
+        return result
+
+    def get_fast_mapped_stake(
+        self,
+        game,
+        txs,
+        base,
+        current_min,
+        current_max,
+        proposed_min,
+        proposed_max,
+        current_slot_multiplier,
+    ):
+        bet_count = base["bet_count"]
+
+        if bet_count <= 0:
+            return 0.0
+
+        normalized_key = (
+            game,
+            id(txs),
+            float(current_slot_multiplier),
+            float(current_min),
+            float(current_max),
+        )
+
+        normalized_sum = self._normalized_bet_cache.get(
+            normalized_key
+        )
+
+        if normalized_sum is None:
+            if current_max <= current_min:
+                normalized_sum = 0.0
+            else:
+                width = current_max - current_min
+                total = 0.0
+
+                for bet in base["bets"]:
+                    normalized = (
+                        float(bet) - current_min
+                    ) / width
+
+                    if normalized < 0.0:
+                        normalized = 0.0
+                    elif normalized > 1.0:
+                        normalized = 1.0
+
+                    total += normalized
+
+                normalized_sum = total
+
+            self._normalized_bet_cache[
+                normalized_key
+            ] = normalized_sum
+
+        return (
+            bet_count * proposed_min
+            + normalized_sum
+            * (
+                proposed_max
+                - proposed_min
+            )
+        )
+
     def simulate_game(
         self,
         game,
@@ -2818,50 +3109,19 @@ class EconomyAnalyzer:
             / current_usage
         )
 
-        bets = (
-            self.infer_game_bets(
-                game,
-                txs,
-                settings[
-                    "current_slot_multiplier"
-                ],
-            )
+        base = self.get_simulation_base(
+            game,
+            txs,
+            settings[
+                "current_slot_multiplier"
+            ],
         )
 
-        observed_net = sum(
-            tx["total"]
-            for tx in txs
-        )
-
-        observed_earned = sum(
-            tx["total"]
-            for tx in txs
-            if tx["total"] > 0
-        )
-
-        observed_lost = -sum(
-            tx["total"]
-            for tx in txs
-            if tx["total"] < 0
-        )
-
-        inferred_rounds = len(
-            bets
-        )
-
-        fallback_rounds = sum(
-            1
-            for tx in txs
-            if not tx[
-                "is_chicken_purchase"
-            ]
-        )
-
-        observed_rounds = (
-            inferred_rounds
-            if inferred_rounds
-            else fallback_rounds
-        )
+        bets = base["bets"]
+        observed_net = base["observed_net"]
+        observed_earned = base["observed_earned"]
+        observed_lost = base["observed_lost"]
+        observed_rounds = base["observed_rounds"]
 
         # Animal Race is handled differently from the other games.
         #
@@ -2874,59 +3134,17 @@ class EconomyAnalyzer:
         # This also avoids inventing a race-to-provision relationship that is
         # not present in the database.
         if game == "animal race":
-            purchase_txs = [
-                tx
-                for tx in txs
-                if is_animal_race_purchase(
-                    tx["original_reason"]
-                )
-            ]
-
-            race_txs = [
-                tx
-                for tx in txs
-                if not is_animal_race_purchase(
-                    tx["original_reason"]
-                )
-            ]
-
-            purchase_net = sum(
-                tx["total"]
-                for tx in purchase_txs
-            )
-
-            purchase_earned = sum(
-                tx["total"]
-                for tx in purchase_txs
-                if tx["total"] > 0
-            )
-
-            purchase_lost = -sum(
-                tx["total"]
-                for tx in purchase_txs
-                if tx["total"] < 0
-            )
-
-            race_net = sum(
-                tx["total"]
-                for tx in race_txs
-            )
-
-            race_earned = sum(
-                tx["total"]
-                for tx in race_txs
-                if tx["total"] > 0
-            )
-
-            race_lost = -sum(
-                tx["total"]
-                for tx in race_txs
-                if tx["total"] < 0
-            )
+            purchase_net = base["purchase_net"]
+            purchase_earned = base["purchase_earned"]
+            purchase_lost = base["purchase_lost"]
+            race_net = base["race_net"]
+            race_earned = base["race_earned"]
+            race_lost = base["race_lost"]
 
             current_avg_bet = (
-                sum(bets) / len(bets)
-                if bets
+                base["old_stake"]
+                / base["bet_count"]
+                if base["bet_count"]
                 else 0
             )
 
@@ -3034,35 +3252,29 @@ class EconomyAnalyzer:
                     activity_scale,
             }
 
-        mapped_bets = [
-            scale_bet(
-                bet,
-                current["min"],
-                current["max"],
-                proposed["min"],
-                proposed["max"],
-            )
-            for bet in bets
-        ]
+        old_stake = base["old_stake"]
 
-        old_stake = sum(
-            bets
-        )
-
-        new_stake_base = sum(
-            mapped_bets
+        new_stake_base = self.get_fast_mapped_stake(
+            game,
+            txs,
+            base,
+            float(current["min"]),
+            float(current["max"]),
+            float(proposed["min"]),
+            float(proposed["max"]),
+            settings[
+                "current_slot_multiplier"
+            ],
         )
 
         current_avg_bet = (
             old_stake
-            / len(bets)
+            / base["bet_count"]
         )
 
         proposed_avg_bet = (
             new_stake_base
-            / len(
-                mapped_bets
-            )
+            / base["bet_count"]
         )
 
         proposed_rounds = (
@@ -5082,6 +5294,13 @@ class DataTable(
 
         self.sort_reverse = {}
 
+        # Rendering tens of thousands of ttk.Treeview rows is extremely slow.
+        # Keep all rows in memory for searching, sorting and CSV export, but
+        # only render one page at a time.
+        self.page_size = 1000
+        self.page_index = 0
+        self._filter_after_id = None
+
         self.double_click_callback = (
             double_click_callback
         )
@@ -5133,7 +5352,7 @@ class DataTable(
 
         self.search_entry.bind_key(
             "<KeyRelease>",
-            self.apply_filter,
+            self.schedule_filter,
         )
 
         RoundedButton(
@@ -5163,6 +5382,32 @@ class DataTable(
 
         self.count_label.pack(
             side=tk.RIGHT
+        )
+
+        RoundedButton(
+            toolbar,
+            "Next",
+            self.next_page,
+            width=62,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        ).pack(
+            side=tk.RIGHT,
+            padx=(6, 0),
+        )
+
+        RoundedButton(
+            toolbar,
+            "Prev",
+            self.previous_page,
+            width=62,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        ).pack(
+            side=tk.RIGHT,
+            padx=(10, 0),
         )
 
         holder = tk.Frame(
@@ -5300,6 +5545,7 @@ class DataTable(
         self.filtered_data = list(
             data
         )
+        self.page_index = 0
 
         self.tree.delete(
             *self.tree.get_children()
@@ -5424,11 +5670,41 @@ class DataTable(
             *self.tree.get_children()
         )
 
+        total_rows = len(
+            self.filtered_data
+        )
+
+        max_page = max(
+            0,
+            (
+                total_rows - 1
+            ) // self.page_size
+            if total_rows
+            else 0,
+        )
+        self.page_index = min(
+            self.page_index,
+            max_page,
+        )
+
+        start = (
+            self.page_index
+            * self.page_size
+        )
+        end = min(
+            total_rows,
+            start + self.page_size,
+        )
+
+        visible_rows = self.filtered_data[
+            start:end
+        ]
+
         for (
-            index,
+            local_index,
             row,
         ) in enumerate(
-            self.filtered_data
+            visible_rows
         ):
             values = []
 
@@ -5462,27 +5738,76 @@ class DataTable(
                     str(value)
                 )
 
+            absolute_index = (
+                start
+                + local_index
+            )
+
             self.tree.insert(
                 "",
                 tk.END,
                 values=values,
                 tags=(
                     "even"
-                    if index % 2 == 0
+                    if absolute_index % 2 == 0
                     else "odd",
                 ),
             )
 
-        self.count_label.config(
-            text=(
-                f"{len(self.filtered_data):,} rows"
+        if total_rows:
+            self.count_label.config(
+                text=(
+                    f"{start + 1:,}-{end:,} of "
+                    f"{total_rows:,} rows"
+                )
             )
+        else:
+            self.count_label.config(
+                text="0 rows"
+            )
+
+    def schedule_filter(
+        self,
+        event=None,
+    ):
+        if self._filter_after_id is not None:
+            try:
+                self.after_cancel(
+                    self._filter_after_id
+                )
+            except Exception:
+                pass
+
+        self._filter_after_id = self.after(
+            250,
+            self.apply_filter,
         )
+
+    def previous_page(
+        self,
+    ):
+        if self.page_index > 0:
+            self.page_index -= 1
+            self.refresh()
+
+    def next_page(
+        self,
+    ):
+        if (
+            (self.page_index + 1)
+            * self.page_size
+            < len(self.filtered_data)
+        ):
+            self.page_index += 1
+            self.refresh()
 
     def apply_filter(
         self,
         event=None,
     ):
+        self._filter_after_id = None
+        self.page_index = 0
+
         text = (
             self.search_var
             .get()
@@ -5559,6 +5884,7 @@ class DataTable(
             column
         ] = not reverse
 
+        self.page_index = 0
         self.refresh()
 
     def get_selected_row(self):
