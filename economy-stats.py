@@ -6,6 +6,7 @@ import math
 import statistics
 import copy
 import random
+import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
@@ -14,7 +15,11 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from functools import lru_cache
 
-BASE_DIR = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent
+
 DB_PATH = BASE_DIR / "economy-stats.dht"
 TABLE_NAME = "message_embeds"
 
@@ -13596,6 +13601,11 @@ class EconomyViewer:
 
 def main():
     root = tk.Tk()
+
+    icon_path = BASE_DIR / "icon.ico"
+
+    if icon_path.exists():
+        root.iconbitmap(str(icon_path))
 
     EconomyViewer(
         root
