@@ -628,7 +628,6 @@ DISCORD_HEADER_NAMES = {
     "Avg 30d Net": "30d Net",
     "Users Played": "Players",
     "Participation %": "Play %",
-    "Avg Plays / Member / Day": "Plays/m/day",
     "Avg Plays / Player / Day": "Plays/p/day",
     "Avg Bet": "Avg Bet",
     "Net / Play": "Net/play",
@@ -708,6 +707,7 @@ def discord_short_value(value, column=""):
         "Original Reason": 30,
         "Reason": 20,
         "User ID": 20,
+        "Username": 24,
         "Timestamp": 19,
         "First Seen": 19,
         "Last Seen": 19,
@@ -1458,6 +1458,15 @@ class EconomyAnalyzer:
 
         self.json_column = None
 
+        # Discord History Tracker stores user records separately from embeds.
+        # Keep a best-effort ID -> username lookup so the UI can use readable
+        # names while still falling back to the raw Discord ID when a name is
+        # unavailable in a particular database.
+        self.user_names = {}
+        self.user_labels = {}
+        self.user_label_to_id = {}
+        self.user_name_source = None
+
         # Fast lookup indexes. These are rebuilt whenever filters are applied,
         # so expensive pages and simulations do not repeatedly scan the entire
         # transaction list.
@@ -1487,6 +1496,445 @@ class EconomyAnalyzer:
         return sqlite3.connect(
             db_path
         )
+
+    def load_user_names(
+        self,
+        connection,
+    ):
+        """Best-effort username lookup from the DHT SQLite database.
+
+        DHT versions can use slightly different table/column names, so this
+        deliberately discovers likely user tables instead of hard-coding one
+        schema. Only values that look like Discord snowflake IDs are accepted.
+        """
+        self.user_names = {}
+        self.user_name_source = None
+
+        cursor = connection.cursor()
+
+        try:
+            cursor.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                ORDER BY name
+                """
+            )
+            tables = [
+                str(row[0])
+                for row in cursor.fetchall()
+                if row
+                and row[0]
+            ]
+        except sqlite3.Error:
+            return
+
+        def normalized_column(
+            value,
+        ):
+            return re.sub(
+                r"[^a-z0-9]",
+                "",
+                str(value).lower(),
+            )
+
+        id_priority = {
+            "discorduserid": 120,
+            "userid": 110,
+            "id": 80,
+        }
+
+        name_priority = {
+            "username": 140,
+            "name": 120,
+            "globalname": 100,
+            "displayname": 90,
+            "nickname": 80,
+            "nick": 70,
+        }
+
+        best = {}
+
+        for table in tables:
+            quoted_table = (
+                table.replace(
+                    '"',
+                    '""',
+                )
+            )
+
+            try:
+                cursor.execute(
+                    f'PRAGMA table_info("{quoted_table}")'
+                )
+                info = cursor.fetchall()
+            except sqlite3.Error:
+                continue
+
+            if not info:
+                continue
+
+            columns = [
+                str(row[1])
+                for row in info
+                if len(row) > 1
+            ]
+
+            normalized = {
+                normalized_column(
+                    column
+                ):
+                    column
+                for column in columns
+            }
+
+            id_candidates = [
+                (
+                    score,
+                    normalized[key],
+                )
+                for key, score
+                in id_priority.items()
+                if key in normalized
+            ]
+
+            name_candidates = [
+                (
+                    score,
+                    normalized[key],
+                )
+                for key, score
+                in name_priority.items()
+                if key in normalized
+            ]
+
+            if (
+                not id_candidates
+                or not name_candidates
+            ):
+                continue
+
+            table_normalized = normalized_column(
+                table
+            )
+
+            userish = (
+                "user" in table_normalized
+                or any(
+                    "user" in normalized_column(
+                        column
+                    )
+                    for column in columns
+                )
+            )
+
+            if not userish:
+                continue
+
+            id_score, id_column = max(
+                id_candidates
+            )
+            name_score, name_column = max(
+                name_candidates
+            )
+
+            discriminator_column = (
+                normalized.get(
+                    "discriminator"
+                )
+            )
+
+            quoted_id = id_column.replace(
+                '"',
+                '""',
+            )
+            quoted_name = name_column.replace(
+                '"',
+                '""',
+            )
+
+            select_columns = [
+                f'"{quoted_id}"',
+                f'"{quoted_name}"',
+            ]
+
+            if discriminator_column:
+                select_columns.append(
+                    '"'
+                    + discriminator_column.replace(
+                        '"',
+                        '""',
+                    )
+                    + '"'
+                )
+
+            try:
+                cursor.execute(
+                    f"""
+                    SELECT {", ".join(select_columns)}
+                    FROM "{quoted_table}"
+                    WHERE "{quoted_id}" IS NOT NULL
+                      AND "{quoted_name}" IS NOT NULL
+                    """
+                )
+                rows = cursor.fetchall()
+            except sqlite3.Error:
+                continue
+
+            table_score = (
+                180
+                if "user" in table_normalized
+                else 40
+            )
+
+            source_score = (
+                table_score
+                + id_score
+                + name_score
+            )
+
+            for row in rows:
+                if len(row) < 2:
+                    continue
+
+                user_id = str(
+                    row[0]
+                ).strip()
+                username = str(
+                    row[1]
+                ).strip()
+
+                if not re.fullmatch(
+                    r"\d{10,25}",
+                    user_id,
+                ):
+                    continue
+
+                if (
+                    not username
+                    or username.lower()
+                    in {
+                        "none",
+                        "null",
+                    }
+                ):
+                    continue
+
+                if (
+                    discriminator_column
+                    and len(row) >= 3
+                ):
+                    discriminator = str(
+                        row[2]
+                    ).strip()
+
+                    if (
+                        discriminator
+                        and discriminator != "0"
+                        and re.fullmatch(
+                            r"\d{4}",
+                            discriminator,
+                        )
+                        and "#"
+                        not in username
+                    ):
+                        username = (
+                            f"{username}"
+                            f"#{discriminator}"
+                        )
+
+                existing = best.get(
+                    user_id
+                )
+
+                if (
+                    existing is None
+                    or source_score
+                    > existing[0]
+                ):
+                    best[
+                        user_id
+                    ] = (
+                        source_score,
+                        username,
+                        table,
+                    )
+
+        for user_id, (
+            _,
+            username,
+            source_table,
+        ) in best.items():
+            self.user_names[
+                user_id
+            ] = username
+
+            if (
+                self.user_name_source
+                is None
+            ):
+                self.user_name_source = (
+                    source_table
+                )
+
+    def rebuild_user_labels(self):
+        all_user_ids = {
+            str(
+                tx["user_id"]
+            )
+            for tx
+            in self.all_transactions
+        }
+
+        all_user_ids.update(
+            self.user_names.keys()
+        )
+
+        names_to_ids = defaultdict(
+            list
+        )
+
+        for user_id in all_user_ids:
+            username = self.user_names.get(
+                user_id
+            )
+
+            if username:
+                names_to_ids[
+                    username.casefold()
+                ].append(
+                    user_id
+                )
+
+        self.user_labels = {}
+        self.user_label_to_id = {}
+
+        for user_id in sorted(
+            all_user_ids
+        ):
+            username = self.user_names.get(
+                user_id
+            )
+
+            if not username:
+                label = user_id
+
+            elif len(
+                names_to_ids[
+                    username.casefold()
+                ]
+            ) > 1:
+                label = (
+                    f"{username} "
+                    f"({user_id})"
+                )
+
+            else:
+                label = username
+
+            self.user_labels[
+                user_id
+            ] = label
+            self.user_label_to_id[
+                label
+            ] = user_id
+
+            self.user_label_to_id[
+                user_id
+            ] = user_id
+
+    def get_user_label(
+        self,
+        user_id,
+    ):
+        user_id = str(
+            user_id
+        )
+
+        return self.user_labels.get(
+            user_id,
+            self.user_names.get(
+                user_id,
+                user_id,
+            ),
+        )
+
+    def resolve_user_label(
+        self,
+        value,
+    ):
+        value = str(
+            value
+        ).strip()
+
+        if not value:
+            return ""
+
+        resolved = (
+            self.user_label_to_id.get(
+                value
+            )
+        )
+
+        if resolved:
+            return resolved
+
+        match = re.search(
+            r"\((\d{10,25})\)\s*$",
+            value,
+        )
+
+        if match:
+            return match.group(1)
+
+        if re.fullmatch(
+            r"\d{10,25}",
+            value,
+        ):
+            return value
+
+        matches = [
+            user_id
+            for user_id, label
+            in self.user_labels.items()
+            if label.casefold()
+            == value.casefold()
+        ]
+
+        if len(matches) == 1:
+            return matches[0]
+
+        return value
+
+    def user_display_row(
+        self,
+        row,
+    ):
+        """Return a user-facing row with Username replacing User ID."""
+        if "User ID" not in row:
+            return dict(
+                row
+            )
+
+        display = {
+            "Username":
+                self.get_user_label(
+                    row[
+                        "User ID"
+                    ]
+                )
+        }
+
+        for key, value in row.items():
+            if key == "User ID":
+                continue
+
+            display[
+                key
+            ] = value
+
+        return display
 
     def find_json_column(
         self,
@@ -1584,6 +2032,10 @@ class EconomyAnalyzer:
         connection = self.connect()
 
         try:
+            self.load_user_names(
+                connection
+            )
+
             self.json_column = (
                 self.find_json_column(
                     connection
@@ -1724,6 +2176,8 @@ class EconomyAnalyzer:
             key=lambda tx:
             tx["timestamp"]
         )
+
+        self.rebuild_user_labels()
 
     def get_available_reasons(
         self,
@@ -2234,7 +2688,12 @@ class EconomyAnalyzer:
         factor = self.get_30_day_factor()
 
         return [
-            ("User ID", user_id),
+            (
+                "Username",
+                self.get_user_label(
+                    user_id
+                ),
+            ),
             ("Net Profit", net),
             ("30d Projected Net", net * factor),
             ("Gross Earned", earned),
@@ -2901,7 +3360,6 @@ class EconomyAnalyzer:
                 "summary": group_summary,
                 "game_rows": [],
                 "member_rows": [],
-                "avg_game_plays_per_member_day": 0.0,
                 "avg_game_net_per_member_24h": 0.0,
                 "avg_game_net_per_member_30d": 0.0,
             }
@@ -2917,7 +3375,6 @@ class EconomyAnalyzer:
         )
 
         total_game_net = 0.0
-        total_game_rounds = 0.0
 
         game_rows = []
 
@@ -2993,7 +3450,6 @@ class EconomyAnalyzer:
             )
 
             total_game_net += net
-            total_game_rounds += rounds
 
             game_rows.append(
                 {
@@ -3008,14 +3464,6 @@ class EconomyAnalyzer:
                             player_count
                             / member_count
                             * 100.0
-                            if member_count
-                            else 0.0
-                        ),
-                    "Avg Plays / Member / Day":
-                        (
-                            rounds
-                            / analysis_days
-                            / member_count
                             if member_count
                             else 0.0
                         ),
@@ -3058,7 +3506,7 @@ class EconomyAnalyzer:
         game_rows.sort(
             key=lambda row:
                 row[
-                    "Avg Plays / Member / Day"
+                    "Avg Plays / Player / Day"
                 ],
             reverse=True,
         )
@@ -3081,8 +3529,10 @@ class EconomyAnalyzer:
 
             member_rows.append(
                 {
-                    "User ID":
-                        str(user_id),
+                    "Username":
+                        self.get_user_label(
+                            user_id
+                        ),
                     "Active Hrs / Day":
                         (
                             float(
@@ -3164,14 +3614,6 @@ class EconomyAnalyzer:
                 game_rows,
             "member_rows":
                 member_rows,
-            "avg_game_plays_per_member_day":
-                (
-                    total_game_rounds
-                    / analysis_days
-                    / member_count
-                    if member_count
-                    else 0.0
-                ),
             "avg_game_net_per_member_24h":
                 (
                     total_game_net
@@ -7863,6 +8305,7 @@ class DataTable(
             "Most Played Game",
             "Game Mix",
             "User ID",
+            "Username",
             "Timestamp",
             "First Seen",
             "Last Seen",
@@ -8460,7 +8903,7 @@ class DataTable(
         if {
             "Game",
             "Users Played",
-            "Avg Plays / Member / Day",
+            "Avg Plays / Player / Day",
         }.issubset(columns):
             return "Activity Group Game Averages"
 
@@ -8471,17 +8914,27 @@ class DataTable(
         }.issubset(columns):
             return "Game Simulation"
 
-        if {
-            "Timestamp",
-            "User ID",
-            "Original Reason",
-        }.issubset(columns):
+        if (
+            {
+                "Timestamp",
+                "Original Reason",
+            }.issubset(
+                columns
+            )
+            and (
+                "Username" in columns
+                or "User ID" in columns
+            )
+        ):
             return "Transactions"
 
-        if {
-            "User ID",
-            "30d Net",
-        }.issubset(columns):
+        if (
+            "30d Net" in columns
+            and (
+                "Username" in columns
+                or "User ID" in columns
+            )
+        ):
             return "Users"
 
         if {
@@ -11638,8 +12091,8 @@ class EconomyViewer:
             page,
             "Users",
             (
-                "Quick comparison of profit, projected profit "
-                "and estimated economy activity."
+                "Quick comparison of profit, projected profit and estimated economy activity. "
+                "Usernames are read from the DHT database when available; unresolved users fall back to their Discord ID."
             ),
         )
 
@@ -12390,7 +12843,7 @@ class EconomyViewer:
                 played_rows,
                 key=lambda row:
                     row[
-                        "Avg Plays / Member / Day"
+                        "Avg Plays / Player / Day"
                     ],
             )
             best_game = max(
@@ -12409,7 +12862,7 @@ class EconomyViewer:
             )
 
             game_text = (
-                f"The historically most-played game for this group is {most_played['Game']} at about {most_played['Avg Plays / Member / Day']:,.2f} plays per member per day. "
+                f"Among members who actually played each game, {most_played['Game']} had the highest play rate at about {most_played['Avg Plays / Player / Day']:,.2f} plays per player per day. "
                 f"The most profitable game for the average group member is {best_game['Game']} at about {best_game['Avg 24h Net / Member']:+,.0f} per day, while {worst_game['Game']} is the weakest at about {worst_game['Avg 24h Net / Member']:+,.0f} per day."
             )
         else:
@@ -12440,20 +12893,14 @@ class EconomyViewer:
                 "avg_game_net_per_member_30d"
             ]
         )
-        plays_day = float(
-            details[
-                "avg_game_plays_per_member_day"
-            ]
-        )
-
         self.activity_group_detail_card.set_text(
             (
                 f"{group_name} contains {details['members']:,} users. A typical member is active for about {active_hours:,.2f} hours per day, makes about {transactions:,.1f} balance changes per day, and is active on the equivalent of about {active_days:,.1f} days out of 30. "
                 f"Across the whole included economy, {overall_text}; at the same pace that is about {net30:+,.0f} over 30 days.\n\n"
-                f"Looking only at historical game activity, the average member played about {plays_day:,.2f} included games per day. Those games contributed about {game24:+,.0f} per member per day, or about {game30:+,.0f} over 30 days. "
+                f"Looking only at historical game activity, the games contributed about {game24:+,.0f} per member per day, or about {game30:+,.0f} over 30 days. "
                 f"{game_text}\n\n"
-                "The game table is descriptive history. 'Avg Plays / Member / Day' averages across everyone in the activity group, including people who did not play that game. "
-                "'Avg Plays / Player / Day' averages only across the members who actually played it. The fixed-frequency Game Simulator does not use these historical play counts or preferences."
+                "'Avg Plays / Player / Day' only averages across members who actually played that game. "
+                "The game table is descriptive history, and the fixed-frequency Game Simulator does not use these historical play counts or preferences."
             )
         )
 
@@ -12858,9 +13305,13 @@ class EconomyViewer:
             source = self.plot_source_dropdown.get()
 
         if source == "Users":
-            return list(
-                self.analyzer.user_stats
-            )
+            return [
+                self.analyzer.user_display_row(
+                    row
+                )
+                for row
+                in self.analyzer.user_stats
+            ]
 
         if source == "Activity Groups":
             try:
@@ -12912,9 +13363,13 @@ class EconomyViewer:
             )
 
         if source == "User Hours":
-            return list(
-                self.analyzer.user_hour_stats
-            )
+            return [
+                self.analyzer.user_display_row(
+                    row
+                )
+                for row
+                in self.analyzer.user_hour_stats
+            ]
 
         if source == "Transactions":
             return [
@@ -12924,9 +13379,12 @@ class EconomyViewer:
                             "timestamp"
                         ]
                     ),
-                    "User ID": tx[
-                        "user_id"
-                    ],
+                    "Username":
+                        self.analyzer.get_user_label(
+                            tx[
+                                "user_id"
+                            ]
+                        ),
                     "Cash": tx[
                         "cash"
                     ],
@@ -16061,7 +16519,13 @@ class EconomyViewer:
         )
 
         self.users_table.set_data(
-            self.analyzer.user_stats
+            [
+                self.analyzer.user_display_row(
+                    row
+                )
+                for row
+                in self.analyzer.user_stats
+            ]
         )
 
         self.sources_table.set_data(
@@ -16077,7 +16541,13 @@ class EconomyViewer:
         )
 
         self.user_hours_table.set_data(
-            self.analyzer.user_hour_stats
+            [
+                self.analyzer.user_display_row(
+                    row
+                )
+                for row
+                in self.analyzer.user_hour_stats
+            ]
         )
 
         transaction_rows = []
@@ -16092,8 +16562,10 @@ class EconomyViewer:
                             tx["timestamp"]
                         ),
 
-                    "User ID":
-                        tx["user_id"],
+                    "Username":
+                        self.analyzer.get_user_label(
+                            tx["user_id"]
+                        ),
 
                     "Cash":
                         tx["cash"],
@@ -16215,15 +16687,15 @@ class EconomyViewer:
         projected = top_projected["30d Net"]
         if projected > 0:
             projected_text = (
-                f"The strongest 30-day estimate is user {top_projected['User ID']}, who would gain about {projected:,.0f} if the same pace continued."
+                f"The strongest 30-day estimate is {self.analyzer.get_user_label(top_projected['User ID'])}, who would gain about {projected:,.0f} if the same pace continued."
             )
         elif projected < 0:
             projected_text = (
-                f"Even the strongest 30-day estimate is negative: user {top_projected['User ID']} would lose about {abs(projected):,.0f} if the same pace continued."
+                f"Even the strongest 30-day estimate is negative: {self.analyzer.get_user_label(top_projected['User ID'])} would lose about {abs(projected):,.0f} if the same pace continued."
             )
         else:
             projected_text = (
-                f"The strongest 30-day estimate is around zero for user {top_projected['User ID']}."
+                f"The strongest 30-day estimate is around zero for {self.analyzer.get_user_label(top_projected['User ID'])}."
             )
 
         average_changes_per_user = (
@@ -16244,7 +16716,7 @@ class EconomyViewer:
                 f"Together they had {total_changes:,} balance changes, or about {average_changes_per_user:,.1f} per person. "
                 f"They received {total_received:,.0f} and spent or lost {total_lost:,.0f}. {total_result}\n\n"
 
-                f"A useful example of a fairly typical user is {typical['User ID']}, because their result is close to the middle of the group. "
+                f"A useful example of a fairly typical user is {self.analyzer.get_user_label(typical['User ID'])}, because their result is close to the middle of the group. "
                 f"They received {typical['Gross Earned']:,.0f}, spent or lost {typical['Gross Lost']:,.0f}, and {typical_result}. "
                 f"If that exact pace continued, their 30-day result would be {typical_month_text}. "
                 f"They had {typical['Transactions']:,.0f} balance changes, used the economy for about {typical['Est. Active Hrs']:,.2f} hours, "
@@ -16252,7 +16724,7 @@ class EconomyViewer:
                 f"and those uses were split into about {typical['Sessions']:,.0f} separate periods of activity. "
                 f"Their most profitable source after both gains and losses were counted was '{typical['Top Income Source']}', and their most recent economy use in this selection was {typical['Last Seen']}.\n\n"
 
-                f"The most active person was {most_active['User ID']} with about {most_active['Est. Active Hrs']:,.2f} hours of economy use. "
+                f"The most active person was {self.analyzer.get_user_label(most_active['User ID'])} with about {most_active['Est. Active Hrs']:,.2f} hours of economy use. "
                 f"Across everyone, the estimated combined time using economy commands was {total_active_hours:,.2f} hours, or about {average_activity_per_user:,.2f} hours per person. "
                 "That combined number can be larger than the length of the selected period because several people can be using the economy at the same time. "
                 "The activity time is estimated from five-minute blocks: if a person used the economy at least once in a five-minute block, that block counts as five minutes.\n\n"
@@ -16588,7 +17060,7 @@ class EconomyViewer:
                     result_words = "finished about even"
 
                 return (
-                    f"User {row['User ID']} at {row['Hour']} received {row['Gross Earned']:,.0f}, spent or lost {row['Gross Lost']:,.0f}, "
+                    f"{self.analyzer.get_user_label(row['User ID'])} at {row['Hour']} received {row['Gross Earned']:,.0f}, spent or lost {row['Gross Lost']:,.0f}, "
                     f"and {result_words} after {row['Transactions']:,} balance changes."
                 )
 
@@ -16618,7 +17090,7 @@ class EconomyViewer:
             def transaction_sentence(tx):
                 direction = "added" if tx["total"] >= 0 else "removed"
                 return (
-                    f"At {to_local_string(tx['timestamp'])}, user {tx['user_id']} had {abs(tx['total']):,.0f} {direction}. "
+                    f"At {to_local_string(tx['timestamp'])}, {self.analyzer.get_user_label(tx['user_id'])} had {abs(tx['total']):,.0f} {direction}. "
                     f"The cash part changed by {tx['cash']:+,.0f} and the bank part changed by {tx['bank']:+,.0f}. "
                     f"The program groups the event under '{tx['reason']}'. The original stored reason was '{tx['original_reason']}'."
                 )
@@ -16626,7 +17098,7 @@ class EconomyViewer:
             transaction_card.set_text(
                 (
                     f"This page contains all {len(txs):,} individual balance changes used by the other pages. "
-                    "The time tells you when the change happened, User ID tells you who it happened to, Cash and Bank show which part of their balance moved, "
+                    "The time tells you when the change happened, Username tells you who it happened to, Cash and Bank show which part of their balance moved, "
                     "and Total is the combined amount. A positive total means they received money; a negative total means money left their balance.\n\n"
                     f"Largest single addition: {transaction_sentence(largest_gain)}\n\n"
                     f"Largest single removal: {transaction_sentence(largest_loss)}"
@@ -16718,7 +17190,7 @@ class EconomyViewer:
 
     def refresh_user_dropdowns(self):
         users = [
-            str(
+            self.analyzer.get_user_label(
                 row["User ID"]
             )
             for row
@@ -16764,25 +17236,35 @@ class EconomyViewer:
         self,
         row,
     ):
-        user_id = (
+        user_value = (
             str(
                 row.get(
-                    "User ID",
-                    "",
+                    "Username",
+                    row.get(
+                        "User ID",
+                        "",
+                    ),
                 )
-            )
-            .replace(
-                ",",
-                "",
             )
             .strip()
         )
 
-        if not user_id:
+        if not user_value:
             return
 
+        user_id = (
+            self.analyzer.resolve_user_label(
+                user_value
+            )
+        )
+        user_label = (
+            self.analyzer.get_user_label(
+                user_id
+            )
+        )
+
         self.user_dropdown.set(
-            user_id
+            user_label
         )
 
         self.view_selected_user(
@@ -16797,10 +17279,16 @@ class EconomyViewer:
         self,
         show_message=True,
     ):
-        user_id = self.user_dropdown.get()
+        user_value = self.user_dropdown.get()
 
-        if user_id == "No users":
+        if user_value == "No users":
             return
+
+        user_id = (
+            self.analyzer.resolve_user_label(
+                user_value
+            )
+        )
 
         txs = self.analyzer.get_user_transactions(
             user_id
@@ -17744,7 +18232,13 @@ class EconomyViewer:
             )
 
             self.sim_user_table.set_data(
-                user_rows
+                [
+                    self.analyzer.user_display_row(
+                        row
+                    )
+                    for row
+                    in user_rows
+                ]
             )
 
             self.update_simulator_explanation(
@@ -17797,34 +18291,47 @@ class EconomyViewer:
         self,
         row,
     ):
-        user_id = (
+        user_value = (
             str(
                 row.get(
-                    "User ID",
-                    "",
+                    "Username",
+                    row.get(
+                        "User ID",
+                        "",
+                    ),
                 )
-            )
-            .replace(
-                ",",
-                "",
             )
             .strip()
         )
 
-        if not user_id:
+        if not user_value:
             return
 
+        user_id = (
+            self.analyzer.resolve_user_label(
+                user_value
+            )
+        )
+
         self.sim_user_dropdown.set(
-            user_id
+            self.analyzer.get_user_label(
+                user_id
+            )
         )
 
         self.view_simulator_user()
 
     def view_simulator_user(self):
-        user_id = self.sim_user_dropdown.get()
+        user_value = self.sim_user_dropdown.get()
 
-        if user_id == "No users":
+        if user_value == "No users":
             return
+
+        user_id = (
+            self.analyzer.resolve_user_label(
+                user_value
+            )
+        )
 
         if (
             self.last_sim_settings is None
