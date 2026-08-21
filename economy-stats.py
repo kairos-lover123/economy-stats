@@ -20,28 +20,30 @@ TABLE_NAME = "message_embeds"
 
 THEMES = {
     "dark": {
-        "APP_BG": "#050505",
-        "SIDEBAR_BG": "#000000",
-        "SIDEBAR_HOVER": "#18181B",
+        # Soft charcoal dark mode. Intentionally avoids pure black so the
+        # interface feels dark without looking flat or harsh.
+        "APP_BG": "#19191F",
+        "SIDEBAR_BG": "#202027",
+        "SIDEBAR_HOVER": "#2D2D36",
         "PRIMARY": "#7C3AED",
         "PRIMARY_HOVER": "#8B5CF6",
-        "TEXT": "#F8FAFC",
-        "MUTED": "#A1A1AA",
-        "CARD": "#0D0D0D",
-        "BORDER": "#27272A",
-        "SOFT_BLUE": "#211A36",
-        "SOFT_GREEN": "#052E16",
-        "SOFT_AMBER": "#3A2600",
+        "TEXT": "#F4F4F5",
+        "MUTED": "#A7A7B3",
+        "CARD": "#23232A",
+        "BORDER": "#3A3A46",
+        "SOFT_BLUE": "#30284A",
+        "SOFT_GREEN": "#1D392A",
+        "SOFT_AMBER": "#46371E",
         "GREEN": "#4ADE80",
         "AMBER": "#FBBF24",
-        "INFO_BG": "#0A0A0A",
-        "SECONDARY_BG": "#18181B",
-        "SECONDARY_HOVER": "#27272A",
-        "TABLE_HEADER_BG": "#18181B",
-        "TABLE_ALT": "#121212",
-        "DEEP_BG": "#090909",
-        "SIDEBAR_TEXT": "#FFFFFF",
-        "ACCENT_TEXT": "#A78BFA",
+        "INFO_BG": "#27272F",
+        "SECONDARY_BG": "#303039",
+        "SECONDARY_HOVER": "#3A3A45",
+        "TABLE_HEADER_BG": "#303039",
+        "TABLE_ALT": "#292930",
+        "DEEP_BG": "#1E1E25",
+        "SIDEBAR_TEXT": "#F7F7FA",
+        "ACCENT_TEXT": "#B79BFF",
     },
     "light": {
         "APP_BG": "#F5F5F7",
@@ -6451,16 +6453,13 @@ class DataTable(
 
         self.sort_reverse = {}
 
-        # Rendering tens of thousands of ttk.Treeview rows is extremely slow.
-        # Keep all rows in memory for searching, sorting and CSV export, but
-        # only render one page at a time.
-        self.page_size = 1000
+        # Tables never scroll vertically. Small tables show every row.
+        # Large tables use pages, so the user only ever needs the horizontal
+        # scrollbar inside the table.
+        self.page_size = 20
         self.page_index = 0
         self._filter_after_id = None
-        self.max_visible_rows = max(
-            1,
-            int(height),
-        )
+        self.natural_column_widths = {}
 
         # Use the same fonts as the ttk Treeview style so column sizing is
         # based on the actual rendered text instead of rough character counts.
@@ -6586,13 +6585,13 @@ class DataTable(
         )
 
         holder.pack(
-            fill=tk.BOTH,
-            expand=True,
+            fill=tk.X,
+            expand=False,
         )
 
         holder.rowconfigure(
             0,
-            weight=1,
+            weight=0,
         )
 
         holder.columnconfigure(
@@ -6600,17 +6599,13 @@ class DataTable(
             weight=1,
         )
 
+        self.table_holder = holder
+
         self.tree = ttk.Treeview(
             holder,
             show="headings",
             selectmode="extended",
             height=height,
-        )
-
-        y_scroll = ttk.Scrollbar(
-            holder,
-            orient=tk.VERTICAL,
-            command=self.tree.yview,
         )
 
         x_scroll = ttk.Scrollbar(
@@ -6620,9 +6615,6 @@ class DataTable(
         )
 
         self.tree.configure(
-            yscrollcommand=(
-                y_scroll.set
-            ),
             xscrollcommand=(
                 x_scroll.set
             ),
@@ -6631,19 +6623,23 @@ class DataTable(
         self.tree.grid(
             row=0,
             column=0,
-            sticky="nsew",
-        )
-
-        y_scroll.grid(
-            row=0,
-            column=1,
-            sticky="ns",
+            sticky="ew",
         )
 
         x_scroll.grid(
             row=1,
             column=0,
             sticky="ew",
+        )
+
+        # Re-fit columns whenever the table area changes width. If all natural
+        # content fits, the columns expand to use the full width instead of
+        # leaving a large empty block on the right. If they do not fit, the
+        # horizontal scrollbar is used.
+        holder.bind(
+            "<Configure>",
+            self.fit_columns_to_viewport,
+            add="+",
         )
 
         self.tree.tag_configure(
@@ -6731,6 +6727,12 @@ class DataTable(
             self.count_label.config(
                 text="0 rows"
             )
+            self.tree.configure(
+                height=1
+            )
+            self.after_idle(
+                self.fit_parent_panel_to_content
+            )
 
             return
 
@@ -6773,18 +6775,18 @@ class DataTable(
             width = self.calculate_column_width(
                 column
             )
+            self.natural_column_widths[
+                column
+            ] = width
 
             self.tree.column(
                 column,
                 width=width,
                 minwidth=max(
                     85,
-                    min(
-                        width,
-                        self.heading_measure_font.measure(
-                            str(column)
-                        ) + 24,
-                    ),
+                    self.heading_measure_font.measure(
+                        str(column)
+                    ) + 24,
                 ),
                 stretch=False,
                 anchor=(
@@ -6795,6 +6797,9 @@ class DataTable(
                 ),
             )
 
+        self.after_idle(
+            self.fit_columns_to_viewport
+        )
         self.refresh()
 
     def display_value(
@@ -6823,23 +6828,20 @@ class DataTable(
         self,
         column,
     ):
-        """Size a Treeview column from its actual heading and cell contents.
+        """Return the exact content-driven width for a table column.
 
-        Treeview cells do not wrap, so content-aware widths plus horizontal
-        scrolling are the most reliable way to keep values readable.
+        There is deliberately no small hard maximum. Long content is allowed
+        to make the table wider because every table has a horizontal scrollbar.
         """
         heading_width = (
             self.heading_measure_font.measure(
                 str(column)
             )
-            + 34
+            + 36
         )
 
         max_cell_width = 0
 
-        # Scan the full dataset once when set_data() runs. This is cheap
-        # compared with rendering thousands of Treeview rows and guarantees
-        # that an unusually long value later in the table is still considered.
         for row in self.data:
             value = self.display_value(
                 row.get(
@@ -6852,58 +6854,93 @@ class DataTable(
                 self.body_measure_font.measure(
                     value
                 )
-                + 30
+                + 32
             )
 
             if measured > max_cell_width:
                 max_cell_width = measured
 
-        desired = max(
-            92,
-            heading_width,
-            max_cell_width,
-        )
-
-        # Text-heavy columns can be wide because the table has a horizontal
-        # scrollbar. Numeric columns stay compact enough to scan comfortably.
-        if column == "Original Reason":
-            maximum = 900
-        elif column in {
-            "Reason",
-            "Value",
-            "Statistic",
-            "Game Mix",
-        }:
-            maximum = 620
-        elif column in {
-            "User ID",
-            "Timestamp",
-            "First Seen",
-            "Last Seen",
-            "Hour",
-        }:
-            maximum = 260
-        elif column in {
-            "Group",
-            "Top Income Source",
-            "Most Played Game",
-            "Game",
-        }:
-            maximum = 260
-        elif (
-            "24h" in column
-            or "30d" in column
-        ):
-            maximum = 210
-        else:
-            maximum = 230
-
         return int(
-            min(
-                maximum,
-                desired,
+            max(
+                96,
+                heading_width,
+                max_cell_width,
             )
         )
+
+    def fit_columns_to_viewport(
+        self,
+        event=None,
+    ):
+        """Fill spare horizontal space, otherwise preserve natural widths."""
+        if not self.columns:
+            return
+
+        try:
+            available = (
+                event.width
+                if event is not None
+                else self.table_holder.winfo_width()
+            )
+
+            available = max(
+                1,
+                int(available) - 4,
+            )
+
+            natural = [
+                int(
+                    self.natural_column_widths.get(
+                        column,
+                        100,
+                    )
+                )
+                for column in self.columns
+            ]
+
+            total_natural = sum(
+                natural
+            )
+
+            if total_natural >= available:
+                widths = natural
+            else:
+                extra = (
+                    available
+                    - total_natural
+                )
+                base_extra = (
+                    extra
+                    // len(self.columns)
+                )
+                remainder = (
+                    extra
+                    % len(self.columns)
+                )
+
+                widths = [
+                    width
+                    + base_extra
+                    + (
+                        1
+                        if index < remainder
+                        else 0
+                    )
+                    for index, width
+                    in enumerate(natural)
+                ]
+
+            for column, width in zip(
+                self.columns,
+                widths,
+            ):
+                self.tree.column(
+                    column,
+                    width=int(width),
+                )
+
+        except Exception:
+            pass
 
     def refresh(self):
         self.tree.delete(
@@ -7000,22 +7037,16 @@ class DataTable(
         self,
         visible_row_count,
     ):
-        """Fit small tables to all rows and let their card grow when needed."""
+        """Show every row on the current page with no vertical table scroll."""
         desired_rows = max(
             1,
-            min(
-                self.max_visible_rows,
-                int(visible_row_count),
-            ),
+            int(visible_row_count),
         )
 
         self.tree.configure(
             height=desired_rows
         )
 
-        # Wrapped labels above a table can change height after the first layout
-        # pass. Resize now, after idle, and once more shortly afterwards so the
-        # panel never clips the bottom rows.
         self.after_idle(
             self.fit_parent_panel_to_content
         )
