@@ -27,18 +27,34 @@
 > If you only want to read the instructions, the **GitHub page itself is the simplest and recommended way to view this README**.
 
 
-A desktop analytics and simulation tool for **UnbelievaBoat Discord economy data** exported into a Discord History Tracker `.dht` database.
+A desktop analytics, visualization, and simulation tool for **UnbelievaBoat Discord economy data** exported into a Discord History Tracker `.dht` database.
 
-The program reads balance-change embeds from the database and turns them into easier-to-understand statistics about:
+The program reads UnbelievaBoat balance-change embeds from the database and turns them into easier-to-understand statistics about:
 
 - how much money users gain and lose
 - which games and commands affect the economy the most
 - how active individual users are
+- natural activity groups such as Very Casual, Casual, Regular, Active, and Very Active
+- historical game averages inside each activity group
 - how users may perform over a 30-day period
 - how proposed UnbelievaBoat game-setting changes could affect players
+- relationships and trends that can be explored with custom plots
 - what the numbers actually mean in plain language
 
-The program also includes a **Game Simulator**, **individual user analysis**, **24-hour normalized simulation results**, **CSV export**, and **light/dark mode**.
+The current application also includes:
+
+- a **Game Simulator**
+- an **activity-group target optimizer**
+- **individual user analysis**
+- **24-hour and 30-day projections**
+- a flexible **Plots** page with bar, line, scatter, and histogram charts
+- direct **Copy Plot Image** support for pasting charts into Discord
+- Discord-friendly **Copy Discord** buttons for tables
+- copy buttons for explanation and simulator text
+- **CSV export**
+- **light/dark mode**
+- automatic **username lookup** from the DHT database when available
+- a packaged-EXE-friendly database locator
 
 ---
 
@@ -46,15 +62,20 @@ The program also includes a **Game Simulator**, **individual user analysis**, **
 
 - [What the program does](#what-the-program-does)
 - [Requirements](#requirements)
+- [Running the packaged EXE](#running-the-packaged-exe)
 - [1. Download the project from GitHub](#1-download-the-project-from-github)
 - [2. Install Python](#2-install-python)
 - [3. Install Visual Studio](#3-install-visual-studio)
 - [4. Get the Discord messages with Discord History Tracker](#4-get-the-discord-messages-with-discord-history-tracker)
 - [5. Prepare the database](#5-prepare-the-database)
-- [6. Open and run the program](#6-open-and-run-the-program)
+- [6. Open and run the source version](#6-open-and-run-the-source-version)
 - [Using the program](#using-the-program)
 - [Understanding each page](#understanding-each-page)
+- [Activity Groups](#activity-groups)
+- [Plots](#plots)
+- [Copying data to Discord](#copying-data-to-discord)
 - [Using the Game Simulator](#using-the-game-simulator)
+- [Activity-group optimizer](#activity-group-optimizer)
 - [How simulation scaling works](#how-simulation-scaling-works)
 - [Important limitations](#important-limitations)
 - [Troubleshooting](#troubleshooting)
@@ -64,48 +85,90 @@ The program also includes a **Game Simulator**, **individual user analysis**, **
 
 # What the program does
 
-Economy Analytics reads a Discord History Tracker SQLite database and looks for UnbelievaBoat balance-change embeds.
+Economy Analytics reads a Discord History Tracker SQLite database and looks for UnbelievaBoat `Balance updated` embeds.
 
 It automatically reads information such as:
 
 - Discord user ID
+- username, when the DHT database contains a usable user record
 - Cash change
 - Bank change
-- Total balance change
-- Reason for the change
-- Timestamp
+- total balance change
+- reason for the change
+- timestamp
 
 It then groups related events together.
 
-For example:
+Examples:
 
 - `roulette won` and `roulette bet` are treated as **Roulette**
 - `slot-machine won` and `slot-machine lost` are treated as **Slot Machine**
 - `higher-lower win` and `higher-lower bet` are treated as **Higher or Lower**
 - `cockfight won` and `cockfight bet` are treated as **Cock Fight**
 - chicken purchases can be counted as part of Cock Fight
+- Animal Race bets, wins, animals, and provisions are handled as **Animal Race**
 - purchase reasons can be grouped under **Buy**
 - role income is grouped under **Role Income**
 
-The goal is to make a large Discord economy history easier to understand without manually going through thousands of messages.
+The program builds fast lookup indexes after loading the database so repeated filtering, table views, simulator runs, activity-group calculations, and optimizer checks do not need to rescan the entire database from scratch every time.
+
+The goal is to make a large Discord economy history easier to inspect, compare, visualize, and balance without manually reading thousands of audit-log messages.
 
 ---
 
 # Requirements
 
+There are two ways to use Economy Analytics.
+
+### If you have a packaged `.exe`
+
+You only need:
+
+- Windows
+- `EconomyAnalytics.exe`
+- your `.dht` database
+
+Python and Visual Studio are **not required** just to run the packaged EXE.
+
+### If you want to run or edit the Python source
+
 You need:
 
 - Windows
 - Python 3
-- Visual Studio with Python support
+- Visual Studio with Python support, or another Python editor
 - the project files from this GitHub repository
-- your `economy-stats.dht` database
+- your `.dht` database
 
-The program uses Python's standard library only.
+The application itself uses the Python standard library only.
 
 **You do not need to install extra Python packages with `pip`.**
 
-The main libraries used by the program, including Tkinter, SQLite, JSON, CSV, statistics, datetime, and pathlib, are included with a normal Windows Python installation.
+The main libraries used by the program include Tkinter, SQLite, JSON, CSV, statistics, datetime, pathlib, and Windows APIs that are available through Python's standard library.
+
+---
+
+# Running the packaged EXE
+
+If you received a release ZIP containing `EconomyAnalytics.exe`, extract the ZIP before opening the program.
+
+Recommended folder layout:
+
+```text
+EconomyAnalytics/
+├── EconomyAnalytics.exe
+└── economy-stats.dht
+```
+
+Do **not** run the EXE directly from inside the ZIP. Windows may start it from a temporary location, which can prevent the program from finding a database that appears to be beside it inside the archive.
+
+At startup the packaged app:
+
+1. looks for `economy-stats.dht` beside `EconomyAnalytics.exe`
+2. if that exact filename is missing but there is exactly one `.dht` file beside the EXE, it uses that file
+3. otherwise it opens the normal **Choose Database** dialog
+
+The packaged version is built as a windowed application, so a normal release should not open a separate Command Prompt window.
 
 ---
 
@@ -469,35 +532,40 @@ Only archive messages that you are allowed to access, and follow the rules that 
 
 # 5. Prepare the database
 
-The program expects a database named:
+The preferred database filename is:
 
 ```text
 economy-stats.dht
 ```
 
-The database must be in the **same folder as the Python program**.
+For the source version, place it beside the main Python file.
 
-Example folder:
+For the packaged version, place it beside `EconomyAnalytics.exe`.
+
+Example source folder:
 
 ```text
 EconomyAnalytics/
-│
 ├── economy-stats.dht
-├── PythonApplication30_fully_explained.py
+├── economy-stats.py
 └── README.md
 ```
 
-The program uses a relative path, so you do **not** need to edit the Python file to point to your own Downloads folder.
-
-Internally it uses the folder containing the Python script and looks for:
+Example packaged folder:
 
 ```text
-economy-stats.dht
+EconomyAnalytics/
+├── EconomyAnalytics.exe
+└── economy-stats.dht
 ```
+
+The program uses the folder containing the Python script when running from source, and the folder containing the actual EXE when running as a PyInstaller build.
+
+If `economy-stats.dht` is not found, the program also checks for another `.dht` file in the app folder. If exactly one is present, it uses that database automatically. Otherwise you can select a database manually with **Choose Database**.
 
 ## What kind of database is expected?
 
-The `.dht` file is an SQLite database produced from Discord history data.
+The `.dht` file is an SQLite database produced by Discord History Tracker.
 
 The program expects a table called:
 
@@ -507,7 +575,7 @@ message_embeds
 
 It automatically searches that table for the JSON column containing Discord embed information.
 
-The balance-change embeds need to contain information similar to:
+The balance-change embeds need information similar to:
 
 ```text
 User: <Discord user>
@@ -515,22 +583,26 @@ Amount: Cash: +29 | Bank: 0
 Reason: chat money
 ```
 
-and a timestamp.
+plus a timestamp.
+
+The program also performs a best-effort search of user-related DHT tables to map Discord IDs to usernames. Different DHT versions can store user information slightly differently, so username lookup is deliberately flexible.
+
+If no username can be resolved for a user, the raw Discord user ID is shown instead.
 
 ## Important
 
 Economy Analytics itself does **not** download Discord messages.
 
-Use the Discord History Tracker steps above to create or update `economy-stats.dht`, then place that database beside the Python program.
+Use Discord History Tracker to create or update the `.dht` database, then open that database in Economy Analytics.
 
 ---
 
-# 6. Open and run the program
+# 6. Open and run the source version
 
 ## Open the project in Visual Studio
 
 1. Start Visual Studio.
-2. Choose **Open a local folder** or go to:
+2. Choose **Open a local folder** or use:
 
 ```text
 File > Open > Folder
@@ -538,8 +610,7 @@ File > Open > Folder
 
 3. Select the folder containing the project.
 4. Open the main `.py` file.
-
-If Visual Studio asks which Python interpreter to use, select the Python installation you installed earlier.
+5. If Visual Studio asks for an interpreter, select your installed Python 3 interpreter.
 
 You can also view interpreters through Visual Studio's **Python Environments** window.
 
@@ -550,41 +621,53 @@ With the main Python file open:
 - press `F5` to run with debugging, or
 - press `Ctrl + F5` to run without debugging
 
-Depending on your Visual Studio setup, you may also be able to right-click the Python file and choose an option such as **Set as Startup File** before running it.
+Depending on the Visual Studio setup, you may also need to right-click the main Python file and choose **Set as Startup File**.
 
-## Alternative: run without Visual Studio
-
-You can also run the program directly from Command Prompt.
+## Run without Visual Studio
 
 Open Command Prompt inside the project folder and run:
 
 ```bash
-python PythonApplication30_fully_explained.py
+python economy-stats.py
 ```
 
-If your file has a different name, replace the filename with the actual `.py` filename.
+If the source file has another name, replace `economy-stats.py` with the actual filename.
 
 If `python` does not work but `py` does, use:
 
 ```bash
-py PythonApplication30_fully_explained.py
+py economy-stats.py
 ```
 
 ---
 
 # Using the program
 
-When the application starts, it automatically tries to load:
+When the application starts, it automatically tries to load a `.dht` database.
+
+The preferred filename is:
 
 ```text
 economy-stats.dht
 ```
 
-from the same directory as the program.
+When running from source, it looks beside the Python file.
 
-If the database loads successfully, the top of the program shows the date range available in the dataset.
+When running as a packaged EXE, it looks beside `EconomyAnalytics.exe`.
 
----
+If that exact file is missing but exactly one `.dht` file is present in the app folder, the program uses that file automatically. Otherwise it opens **Choose Database**.
+
+If the database loads successfully, the top of the application shows information about the selected dataset and available date range.
+
+The main interface is built around:
+
+- global analysis filters
+- searchable and sortable tables
+- plain-English explanation cards
+- natural activity groups
+- custom plots
+- the Game Simulator
+- Discord-friendly copy tools
 
 ## Analysis filters
 
@@ -594,13 +677,13 @@ The filter area controls what data is included in the analysis.
 
 The **Exclude** menu lets you remove specific categories from the analysis.
 
-For example, you may want to exclude:
+Examples include:
 
 - Add Money
 - Remove Money
 - Buy
 - Role Income
-- specific games
+- individual games
 
 You can select multiple categories.
 
@@ -622,7 +705,7 @@ Counting chickens as Cock Fight is useful when you want Cock Fight results to in
 
 ### Time range
 
-You can choose ranges such as:
+Available quick ranges include:
 
 - All time
 - Last 1 hour
@@ -635,13 +718,11 @@ You can choose ranges such as:
 - Last 30 days
 - Custom
 
-Quick ranges are based on the newest transaction in the database.
+Quick ranges are based on the newest transaction in the database, not the current wall-clock time.
 
-This means an older saved database can still be analyzed correctly without depending on the current date on your computer.
+This means an older saved database can still be analyzed correctly.
 
 ### Custom dates
-
-You can enter your own start and end times.
 
 Supported examples include:
 
@@ -656,15 +737,15 @@ Leaving one side blank makes that side unrestricted.
 
 ### Apply button
 
-Changing a filter does **not** immediately rerun the analysis.
+Changing filters does **not** immediately rerun the analysis.
 
-After choosing your filters, press:
+After choosing filters, press:
 
 ```text
 Apply
 ```
 
-The status indicator will tell you when changes are still waiting to be applied.
+The status indicator shows when changes are still waiting to be applied.
 
 ---
 
@@ -672,7 +753,9 @@ The status indicator will tell you when changes are still waiting to be applied.
 
 The program contains several pages in the left sidebar.
 
-Each page includes a plain-English explanation generated from the actual numbers currently being shown.
+Most pages contain a plain-English explanation generated from the actual numbers currently being shown.
+
+Tables are designed to avoid vertical scrolling inside the table itself. Small result sets expand to show their rows, while larger result sets use pagination. Horizontal scrolling is still available when a table contains many columns.
 
 ---
 
@@ -710,7 +793,9 @@ the program explains that users collectively ended the selected period about `78
 
 The Users page gives one row per user.
 
-This is useful for quickly comparing everyone without opening each user separately.
+When the DHT database contains a resolvable username, the app shows the username instead of the raw Discord ID. If no username is available, it falls back to the user ID.
+
+This page is useful for quickly comparing everyone without opening each user separately.
 
 Important values include:
 
@@ -718,25 +803,11 @@ Important values include:
 
 How much the user's balance changed overall during the selected period.
 
-Positive:
-
-```text
-+10,000
-```
-
-means the user ended up 10,000 richer.
-
-Negative:
-
-```text
--10,000
-```
-
-means the user ended up 10,000 poorer.
+Positive values mean the user became richer. Negative values mean the user became poorer.
 
 ### 30d Net
 
-An estimate of what the user's result would look like over 30 days if the behavior seen in the selected period continued at the same pace.
+An estimate of what the user's result would look like over 30 days if the behavior seen in the selected period continued at the same average pace.
 
 This is a projection, not a guarantee.
 
@@ -752,9 +823,7 @@ All negative balance changes added together as a positive loss amount.
 
 An estimate of how much time the user spent actively using the economy.
 
-This is based on 5-minute activity windows.
-
-If the user makes several economy transactions in the same 5-minute block, that block counts as approximately 5 minutes of activity rather than treating every transaction as separate playtime.
+Activity is estimated using 5-minute activity windows. Several transactions inside the same 5-minute block count as one active block instead of several separate periods of playtime.
 
 ### Activity %
 
@@ -762,7 +831,9 @@ How much of the selected period the user appears to have spent actively using th
 
 ### Sessions
 
-An estimate of how many separate periods of economy activity the user had.
+An estimate of separate periods of economy activity.
+
+A new session starts when the gap from the previous activity is large enough to be treated as a separate period of use.
 
 ### Active Days
 
@@ -770,7 +841,7 @@ How many different days the user used the economy.
 
 ### Top Income Source
 
-The game or command responsible for the largest amount of money added to that user.
+The source with the largest **positive net contribution** to that user.
 
 ### Double-click a user
 
@@ -782,13 +853,15 @@ Double-click a row in the Users table to open that person in **User Breakdown**.
 
 This page lets you inspect one user in detail.
 
-Choose a user and press:
+Choose a username from the selector and press:
 
 ```text
 View user
 ```
 
-It shows:
+If a username could not be resolved from the DHT database, the selector shows the raw Discord ID instead.
+
+The page shows:
 
 - whether the user gained or lost money overall
 - estimated activity
@@ -866,7 +939,7 @@ This page shows the individual balance changes used by the program.
 It includes:
 
 - timestamp
-- user ID
+- username when available, otherwise user ID
 - Cash change
 - Bank change
 - total change
@@ -881,31 +954,47 @@ Use this page when you want to inspect the raw event behind a statistic.
 
 Most tables have a search box.
 
-Type part of:
+You can search for values such as:
 
-- a user ID
-- a game
-- a reason
-- a date
-- a value
+- username
+- user ID when shown
+- game
+- reason
+- date
+- numeric value
 
-to narrow the rows.
+Click a table heading to sort by that column.
 
-You can click table headers to sort by a column.
-
-For example, clicking **Net Profit** can help you quickly find the largest winners or losers.
+Large tables use pagination instead of an internal vertical scrollbar. Horizontal scrolling is available when the table is wider than the window.
 
 ---
 
-# Copying data
+# Copying data to Discord
 
-Tables support copying.
+Tables support normal row/cell copying and a Discord-friendly formatted copy mode.
 
 You can:
 
 - select a row and press `Ctrl + C`
 - right-click and choose **Copy row**
 - right-click a cell and choose **Copy cell**
+- press **Copy Discord** to copy the current page as a compact monospace Discord table
+- right-click a table and choose **Copy current page for Discord**
+
+The Discord formatter:
+
+- wraps the table in a Discord code block
+- shortens long headings where useful
+- aligns columns
+- compacts large numbers
+- tries to stay below Discord's normal message length
+- reports when rows had to be omitted from the copied page
+
+Explanation cards also include **Copy** buttons so their text can be pasted directly into Discord.
+
+Simulator summaries and optimizer result text also have copy buttons.
+
+On the **Plots** page, **Copy Plot Image** copies the rendered chart itself to the Windows clipboard so it can be pasted directly into Discord with `Ctrl + V`.
 
 ---
 
@@ -941,24 +1030,165 @@ The application rebuilds its interface with the new theme while keeping the curr
 
 ---
 
+# Activity Groups
+
+The Activity Groups page groups users by **natural activity levels** rather than forcing exactly 20% of users into each group.
+
+The available labels are:
+
+- Very Casual
+- Casual
+- Regular
+- Active
+- Very Active
+
+Depending on the data, groups can have very different sizes and a group can even be empty.
+
+You can group users by:
+
+- **Combined activity**
+- **Estimated active hours**
+- **Transactions**
+
+Combined activity uses both estimated active time and transaction activity.
+
+The main table shows group-level averages such as:
+
+- members
+- average active hours per day
+- average transactions per day
+- average active days per 30 days
+- average 24-hour result
+- average 30-day result
+
+## Detailed activity-group view
+
+Choose a group in the **Detailed group** selector, or double-click a group in the main table.
+
+The detailed explanation summarizes what a typical member of that group looks like.
+
+The **Historical game averages** table lets you compare the games used by that group.
+
+Useful columns include:
+
+- **Users Played**
+- **Participation %**
+- **Avg Plays / Player / Day**
+- **Avg Bet**
+- **Net / Play**
+- **Avg 24h Net / Member**
+- **Avg 30d Net / Member**
+
+`Avg Plays / Player / Day` averages only across members who actually played that game.
+
+The detailed page also contains a **Group members** table. Usernames are shown when they can be resolved from the DHT database, and double-clicking a member opens their full User Breakdown.
+
+### Important distinction
+
+The detailed activity-group game table is **descriptive history**.
+
+It tells you what members of that group actually did in the selected database period.
+
+Those historical game-play counts are **not** used to decide how frequently games are played inside the fixed-frequency Game Simulator.
+
+---
+
+# Plots
+
+The Plots page lets you build charts from the data already calculated by the application.
+
+Supported chart types include:
+
+- **Bar**
+- **Line**
+- **Scatter**
+- **Histogram**
+
+You can choose:
+
+- data source
+- X value
+- Y value
+- optional second Y value when supported
+- aggregation
+- sorting
+- maximum number of plotted points
+
+Available sources can include:
+
+- Users
+- Activity Groups
+- Activity Group Games
+- Income Sources
+- Hourly
+- Daily
+- User Hours
+- Transactions
+- Game Simulation
+
+Useful examples include:
+
+- active hours vs 30-day user result
+- transactions per day vs 30-day result
+- income-source net result
+- hourly economy trend
+- daily economy trend
+- activity-group 30-day result
+- game profitability by activity group
+- current vs proposed simulator results
+
+Scatter plots can also calculate a Pearson correlation value to describe the strength and direction of a linear relationship.
+
+Correlation does **not** prove that one variable causes the other.
+
+## Copy Plot Image
+
+After creating a plot, press:
+
+```text
+Copy Plot Image
+```
+
+The app copies the rendered chart directly to the Windows clipboard.
+
+You can then paste it directly into Discord, Paint, an image editor, or another application with:
+
+```text
+Ctrl + V
+```
+
+No extra plotting package is required. The charts are rendered by the application itself.
+
+---
+
 # Using the Game Simulator
 
 The Game Simulator lets you test proposed economy changes without immediately changing the Discord server.
 
-It uses how people actually played during your selected history and estimates what those same patterns could look like under different settings.
+The simulator uses historical data for two main things:
+
+1. estimating how much active economy time users have
+2. estimating the economics and betting behavior of each game
+
+It does **not** use each user's historical game popularity to decide how many times that user plays each game.
+
+Instead, play frequency is controlled by the fixed **plays of each game per 5 active minutes** setting.
 
 The simulator supports:
 
+- current and proposed plays of **each game** per 5 active minutes
 - game bet limits
-- overall game usage rate
 - Blackjack deck count
 - Cock Fight starting win chance
 - Cock Fight maximum win chance
 - chicken price
 - Slot Machine symbol count
 - Slot Machine multiplier
+- individual-user simulation
+- activity-group targets and optimization
+- copy-paste UnbelievaBoat command generation
 
-The games included are:
+Games analyzed by the simulator include:
 
 - Blackjack
 - Cock Fight
@@ -966,12 +1196,15 @@ The games included are:
 - Russian Roulette
 - Slot Machine
 - Higher or Lower
+- Animal Race
+
+Animal Race is treated differently from normal bet-limit games because animal/provision purchases are not assumed to happen once per race. A reusable horse or other animal can participate in many races, so purchase costs are kept separate from the race-count multiplier.
 
 ---
 
 ## Current vs Proposed
 
-Each setting has a current value and a proposed value.
+Each configurable setting has a current value and a proposed value.
 
 Example:
 
@@ -985,9 +1218,9 @@ Proposed Min: 75
 Proposed Max: 500
 ```
 
-This means you are asking:
+This asks:
 
-> What would the results look like if Blackjack still had a minimum bet of 75, but its maximum bet was reduced from 750 to 500?
+> What would the results look like if Blackjack kept the same minimum bet but used a lower maximum bet?
 
 ---
 
@@ -999,9 +1232,9 @@ After changing simulator settings, press:
 Run Simulation
 ```
 
-The simulator then recalculates the results.
+The simulator recalculates the current and proposed outcomes.
 
-Changing a field does not automatically overwrite the previous simulation.
+Changing a field does not automatically overwrite the previous simulation. This prevents partially edited settings from immediately replacing the last result.
 
 ---
 
@@ -1027,20 +1260,23 @@ It answers a question closer to:
 
 # Individual user simulation
 
-The simulator also contains a user table.
+The simulator also lets you inspect one user.
 
-Each user gets their own estimated 24-hour result.
+The user's historical data is used to estimate their active economy time.
+
+The simulator then applies the same fixed play-frequency assumption used everywhere else: each included game is played the configured number of times per five active minutes.
 
 You can inspect:
 
-- how many games that user plays in a typical day
-- how much they currently gain or lose
-- how much they may gain or lose after the proposed settings
-- how large the difference is
+- estimated active time
+- current game result
+- proposed game result
+- change between current and proposed settings
+- game-by-game effects
 
-Double-clicking a user in the simulator opens their individual simulation details.
+Usernames are shown when they can be resolved from the DHT database.
 
-You can also choose a user manually from the individual-user section.
+Double-clicking a user in a simulator table opens their individual simulation details.
 
 ---
 
@@ -1086,37 +1322,43 @@ This is intended to preserve the user's relative betting style while testing a d
 
 # Games per 5 minutes
 
-The simulator can also change:
+The simulator uses:
 
 ```text
-Current games / 5 min
+Current plays of EACH game / 5 active min
 ```
 
 and:
 
 ```text
-Proposed games / 5 min
+Proposed plays of EACH game / 5 active min
 ```
 
-This changes how frequently the historical game activity is assumed to happen.
+This setting is intentionally **not** a total number of games shared between all game types.
 
-Example:
+If the value is:
 
 ```text
-Current: 2
-Proposed: 1
+2
 ```
 
-means the simulator assumes users would play at roughly half the current frequency.
+then for each five active minutes the simulator assumes:
 
-Example:
+- 2 Blackjack plays
+- 2 Cock Fight plays
+- 2 Roulette plays
+- 2 Russian Roulette plays
+- 2 Slot Machine plays
+- 2 Higher or Lower plays
+- 2 Animal Race plays
+
+The approximate daily play count for each game is based on:
 
 ```text
-Current: 2
-Proposed: 4
+active hours per day × 12 × plays of each game per 5 active minutes
 ```
 
-means it assumes roughly twice the current game activity.
+This means activity groups differ mainly because they spend different amounts of time actively using the economy, not because the simulator copies the historical game preferences of each group.
 
 ---
 
@@ -1224,6 +1466,42 @@ The program needs the same number of symbols as the proposed symbol count before
 
 ---
 
+# Activity-group optimizer
+
+The Game Simulator includes an optimizer that can search for proposed settings intended to move selected activity groups toward chosen 30-day earnings targets.
+
+You can set separate targets for multiple groups, such as:
+
+```text
+Very Casual: +5,000 / 30d
+Regular: +12,000 / 30d
+Very Active: +25,000 / 30d
+```
+
+The optimizer evaluates the same simulator assumptions used by the normal simulation rather than using historical game popularity as the play-volume model.
+
+Settings can be locked so the optimizer is not allowed to change them.
+
+Lockable values include:
+
+- global play rate
+- individual game minimum and maximum bets
+- Slot Machine symbol count
+- Slot Machine multiplier
+- Cock Fight starting chance
+- Cock Fight maximum chance
+- chicken price
+
+The optimizer also attempts to avoid making one configurable game overwhelmingly better than every other game.
+
+Russian Roulette is intentionally excluded from the normal "make games broadly beneficial" balancing objective.
+
+Blackjack deck count can be recorded and included in generated commands, but it is not automatically treated as a precisely optimizable expected-value parameter.
+
+Optimizer output is still an estimate. Always compare the result with the normal simulator, review the generated settings, and use judgment before applying changes on Discord.
+
+---
+
 # 30-day projections
 
 The Users page contains 30-day projections.
@@ -1304,6 +1582,8 @@ Most pages contain an explanation box.
 
 These explanations are generated using the numbers currently shown on the page.
 
+Explanation cards also include a **Copy** button so the interpretation can be pasted directly into Discord.
+
 The application attempts to answer questions such as:
 
 - Did users become richer or poorer?
@@ -1325,7 +1605,7 @@ The results should be treated as analysis and estimates, not guaranteed future o
 
 ## Historical behavior may change
 
-The simulator assumes users behave similarly to how they behaved during the selected period.
+The simulator assumes historical active-time estimates and game economics remain reasonably representative. Play frequency itself is controlled by the configured fixed plays-per-game rate rather than copying each user's historical game mix.
 
 Real users may change their behavior after:
 
@@ -1403,25 +1683,33 @@ The program will read the database again.
 
 # Database location
 
-The program uses a relative database path.
+The application uses a relative database location.
 
-It looks for:
+### Source version
+
+When running the `.py` file, the program looks beside the Python script.
+
+### Packaged EXE
+
+When running a PyInstaller build, the program uses the actual folder containing `EconomyAnalytics.exe`, not PyInstaller's temporary extraction directory.
+
+The preferred filename is:
 
 ```text
 economy-stats.dht
 ```
 
-inside the same folder as the Python script.
+If that exact file does not exist but there is exactly one `.dht` file beside the app, the program uses that file automatically.
 
-You should not need to edit something like:
+If it cannot choose a database unambiguously, it opens **Choose Database**.
+
+This means you should not need to hard-code paths such as:
 
 ```text
 C:\Users\YourName\Downloads\...
 ```
 
-inside the source code.
-
-This also makes the repository easier to move between computers.
+inside the source.
 
 ---
 
@@ -1429,22 +1717,30 @@ This also makes the repository easier to move between computers.
 
 ## Error: database file not found
 
-Make sure the files are arranged like this:
+For the source version, use:
 
 ```text
 Project Folder/
 ├── economy-stats.dht
-├── your_program.py
+├── economy-stats.py
 └── README.md
 ```
 
-The database name must be:
+For the packaged version, use:
 
 ```text
-economy-stats.dht
+EconomyAnalytics/
+├── EconomyAnalytics.exe
+└── economy-stats.dht
 ```
 
-unless you intentionally change `DB_PATH` in the source code.
+If you received a ZIP, **extract it before running the EXE**.
+
+Do not run the EXE directly from inside the compressed archive.
+
+If `economy-stats.dht` is not present but exactly one other `.dht` file is beside the app, the current version can use that file automatically.
+
+If there are several `.dht` files, use **Choose Database** and select the correct one.
 
 ---
 
@@ -1482,6 +1778,25 @@ If Python works in Command Prompt but Visual Studio cannot see it:
 2. Open the Python Environments window.
 3. Check whether your installed Python interpreter appears.
 4. Make sure the **Python development** workload is installed through Visual Studio Installer.
+
+---
+
+## Usernames are not showing
+
+Username display is best-effort.
+
+The program searches user-related tables in the DHT database and attempts to map Discord IDs to usernames.
+
+If a particular username cannot be found, the app intentionally falls back to the raw Discord user ID.
+
+Possible reasons include:
+
+- the DHT database does not contain that user's record
+- the DHT version stored user information differently
+- the user record was not captured in the archived history
+- duplicate historical usernames require the app to include an ID for disambiguation
+
+The economy calculations still work when only the ID is available.
 
 ---
 
@@ -1548,21 +1863,37 @@ Also check whether categories such as `add money`, `remove money`, or purchases 
 
 # Privacy
 
-Your `.dht` database may contain Discord user IDs and server activity.
+A `.dht` database may contain far more than the balance numbers shown in Economy Analytics.
 
-It is strongly recommended that you **do not upload your personal database to GitHub**.
+It can contain:
 
-Add this to your `.gitignore`:
+- Discord user IDs
+- usernames
+- message contents
+- channel information
+- embeds
+- timestamps
+- other saved server history
+
+Treat the database as private data.
+
+It is strongly recommended that you **do not upload your real `.dht` database to GitHub**.
+
+Add this to `.gitignore`:
 
 ```gitignore
 *.dht
+*.dht_downloads
 __pycache__/
 *.pyc
+.vs/
 ```
 
-That prevents `.dht` databases from being accidentally committed in normal Git workflows.
+That prevents normal Git workflows from accidentally adding the main DHT database, DHT companion download folders, Python cache files, and Visual Studio workspace files.
 
-If your repository is public, check the files before every upload or commit to make sure no private Discord history is included.
+If your repository is public, inspect the files before every upload or commit.
+
+The source code, README, icon, and packaged EXE can be shared separately from your private database.
 
 ---
 
@@ -1590,26 +1921,39 @@ from inside the repository folder.
 
 # Quick setup summary
 
-For a completely new user:
+## If you received a packaged release
+
+1. Download the Economy Analytics ZIP.
+2. Extract the ZIP.
+3. Put your `.dht` database beside `EconomyAnalytics.exe`.
+4. Prefer the name `economy-stats.dht`.
+5. Run `EconomyAnalytics.exe`.
+6. If the app cannot choose the correct database automatically, select it with **Choose Database**.
+7. Choose your timeframe.
+8. Press **Apply**.
+9. Explore Overview, Users, Activity Groups, Plots, and the other analysis pages.
+10. Use Game Simulator before changing Discord economy settings.
+
+## If you want to run or edit the source
 
 1. Download and install Python.
 2. Download and install Visual Studio Community.
 3. Enable the **Python development** workload.
-4. Download this repository using **Code > Download ZIP**.
-5. Extract the ZIP.
-6. Download the latest Discord History Tracker desktop app from `https://dht.chylex.com/`.
-7. If you already have an older `.dht` database, open that database. Otherwise create a new one named `economy-stats.dht`.
-8. Open Discord in your browser and go to the channel containing the UnbelievaBoat `Balance updated` logs.
-9. Connect Discord History Tracker using its userscript/connection-code method or its **Copy Tracking Script** method.
-10. Let DHT automatically scroll through and save the history you want.
-11. Put `economy-stats.dht` in the extracted Economy Analytics folder beside the Python script.
-12. Open that folder in Visual Studio.
-13. Open the main Python file.
-14. Press `Ctrl + F5`.
-15. Choose your analysis timeframe.
-16. Press **Apply**.
-17. Use the pages on the left to explore the economy.
-18. Use **Game Simulator** to test balancing changes before applying them to Discord.
+4. Download this repository using **Code > Download ZIP**, or clone it with Git.
+5. Extract/open the repository.
+6. Download Discord History Tracker from `https://dht.chylex.com/`.
+7. Open an existing `.dht` database if you already have one, otherwise create one.
+8. Track the channel containing the UnbelievaBoat `Balance updated` logs.
+9. Let DHT collect the history you need.
+10. Put the `.dht` file beside the Python source, or select it manually in the app.
+11. Open the project folder in Visual Studio.
+12. Run the main Python file.
+13. Choose the analysis timeframe.
+14. Press **Apply**.
+15. Use **Activity Groups** for natural user-group comparisons.
+16. Use **Plots** for visual comparisons and relationships.
+17. Use **Game Simulator** and the activity-group optimizer to test balancing changes.
+18. Copy Discord tables, explanation text, simulator commands, or plot images as needed.
 
 ---
 
@@ -1619,4 +1963,4 @@ This project is an independent analytics tool.
 
 It is not affiliated with, endorsed by, or maintained by Discord, UnbelievaBoat, or Discord History Tracker.
 
-Simulation results are estimates based on historical data and the assumptions implemented by the program.
+Simulation, optimizer, activity, correlation, and 30-day results are estimates based on historical data and the assumptions implemented by the program.
