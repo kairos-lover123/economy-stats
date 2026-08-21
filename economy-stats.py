@@ -5,6 +5,7 @@ import csv
 import math
 import statistics
 import copy
+import random
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from collections import defaultdict
@@ -1797,6 +1798,16 @@ class EconomyAnalyzer:
         self,
         basis="Combined activity",
     ):
+        """Group users by natural activity levels instead of equal-sized bins.
+
+        The old implementation ranked everybody and forced 20% of users into
+        each label. That makes the labels misleading when a server has many
+        casual users and only a few genuinely heavy economy users.
+
+        This version measures activity as a per-day rate, log-compresses the
+        heavy tail, and then performs deterministic one-dimensional k-means.
+        The resulting groups are allowed to have very different member counts.
+        """
         if basis not in ACTIVITY_GROUP_BASIS_OPTIONS:
             basis = "Combined activity"
 
@@ -1806,105 +1817,296 @@ class EconomyAnalyzer:
                 for name in ACTIVITY_GROUP_NAMES
             }
 
+        analysis_days = max(
+            self.get_analysis_days(),
+            1.0 / 24.0,
+        )
+
         records = []
 
         for row in self.user_stats:
+            active_hours = float(
+                row["Est. Active Hrs"]
+            )
+            transactions = int(
+                row["Transactions"]
+            )
+
             records.append(
                 {
                     "user_id": str(row["User ID"]),
-                    "active_hours": float(row["Est. Active Hrs"]),
-                    "transactions": int(row["Transactions"]),
+                    "active_hours": active_hours,
+                    "transactions": transactions,
                     "active_days": int(row["Active Days"]),
                     "net": float(row["Net Profit"]),
+                    "hours_per_day": (
+                        active_hours
+                        / analysis_days
+                    ),
+                    "transactions_per_day": (
+                        transactions
+                        / analysis_days
+                    ),
                 }
             )
 
-        def average_tie_percentiles(values):
-            indexed = sorted(
-                enumerate(values),
-                key=lambda item: item[1],
+        hour_logs = [
+            math.log1p(
+                row["hours_per_day"]
             )
-            result = [0.0] * len(values)
-            n = len(values)
-            i = 0
+            for row in records
+        ]
+        tx_logs = [
+            math.log1p(
+                row["transactions_per_day"]
+            )
+            for row in records
+        ]
 
-            while i < n:
-                j = i + 1
-                while (
-                    j < n
-                    and indexed[j][1] == indexed[i][1]
-                ):
-                    j += 1
+        def percentile_value(values, fraction):
+            if not values:
+                return 0.0
 
-                average_rank = (i + j - 1) / 2
-                percentile = (
-                    average_rank / max(1, n - 1)
-                    if n > 1
-                    else 0.5
-                )
+            ordered = sorted(values)
+            if len(ordered) == 1:
+                return ordered[0]
 
-                for k in range(i, j):
-                    result[indexed[k][0]] = percentile
+            position = (
+                len(ordered) - 1
+            ) * fraction
+            lower = int(math.floor(position))
+            upper = int(math.ceil(position))
 
-                i = j
+            if lower == upper:
+                return ordered[lower]
 
-            return result
+            weight = position - lower
+            return (
+                ordered[lower]
+                * (1.0 - weight)
+                + ordered[upper]
+                * weight
+            )
 
-        hour_percentiles = average_tie_percentiles(
-            [row["active_hours"] for row in records]
+        # Scale the two combined features by the 90th percentile rather than
+        # ranks. This keeps hours and transaction count comparable without
+        # forcing the final score itself to be uniformly distributed.
+        hour_scale = max(
+            1e-9,
+            percentile_value(
+                hour_logs,
+                0.90,
+            ),
         )
-        tx_percentiles = average_tie_percentiles(
-            [row["transactions"] for row in records]
+        tx_scale = max(
+            1e-9,
+            percentile_value(
+                tx_logs,
+                0.90,
+            ),
         )
 
         for index, row in enumerate(records):
             if basis == "Estimated active hours":
-                row["activity_score"] = hour_percentiles[index]
+                score = hour_logs[index]
             elif basis == "Transactions":
-                row["activity_score"] = tx_percentiles[index]
+                score = tx_logs[index]
             else:
-                row["activity_score"] = (
-                    hour_percentiles[index]
-                    + tx_percentiles[index]
-                ) / 2
+                score = (
+                    hour_logs[index]
+                    / hour_scale
+                    + tx_logs[index]
+                    / tx_scale
+                ) / 2.0
 
-        records.sort(
-            key=lambda row: (
-                row["activity_score"],
-                row["active_hours"],
-                row["transactions"],
-                row["active_days"],
-                row["user_id"],
+            row["activity_score"] = float(score)
+
+        def natural_clusters(values, wanted_clusters):
+            """Return a cluster id for each 1D value using deterministic k-means."""
+            if not values:
+                return [], []
+
+            unique_values = sorted(set(values))
+            cluster_count = min(
+                wanted_clusters,
+                len(unique_values),
             )
+
+            if cluster_count <= 1:
+                return [0] * len(values), [statistics.mean(values)]
+
+            low = min(values)
+            high = max(values)
+
+            if math.isclose(low, high):
+                return [0] * len(values), [low]
+
+            # Value-spaced initialization is deliberate. Quantile-spaced
+            # centers would tend to recreate the equal-sized groups that this
+            # method is replacing.
+            centers = [
+                low
+                + (
+                    high - low
+                ) * (
+                    index
+                    / (cluster_count - 1)
+                )
+                for index in range(cluster_count)
+            ]
+
+            assignments = [0] * len(values)
+
+            for _ in range(100):
+                new_assignments = []
+
+                for value in values:
+                    cluster_index = min(
+                        range(cluster_count),
+                        key=lambda index: (
+                            abs(
+                                value
+                                - centers[index]
+                            ),
+                            index,
+                        ),
+                    )
+                    new_assignments.append(
+                        cluster_index
+                    )
+
+                buckets = [
+                    []
+                    for _ in range(cluster_count)
+                ]
+
+                for value, cluster_index in zip(
+                    values,
+                    new_assignments,
+                ):
+                    buckets[cluster_index].append(
+                        value
+                    )
+
+                new_centers = list(centers)
+
+                for cluster_index, bucket in enumerate(buckets):
+                    if bucket:
+                        new_centers[cluster_index] = statistics.mean(
+                            bucket
+                        )
+                    else:
+                        # Re-seed an empty cluster with the value currently
+                        # furthest from every occupied center.
+                        occupied = [
+                            centers[index]
+                            for index, values_in_bucket
+                            in enumerate(buckets)
+                            if values_in_bucket
+                        ]
+
+                        if occupied:
+                            candidate = max(
+                                values,
+                                key=lambda value: min(
+                                    abs(value - center)
+                                    for center in occupied
+                                ),
+                            )
+                            new_centers[cluster_index] = candidate
+
+                if (
+                    new_assignments == assignments
+                    and all(
+                        math.isclose(
+                            new_centers[index],
+                            centers[index],
+                            rel_tol=1e-10,
+                            abs_tol=1e-10,
+                        )
+                        for index in range(cluster_count)
+                    )
+                ):
+                    assignments = new_assignments
+                    centers = new_centers
+                    break
+
+                assignments = new_assignments
+                centers = new_centers
+
+            # Renumber clusters from least active to most active.
+            order = sorted(
+                range(cluster_count),
+                key=lambda index: centers[index],
+            )
+            remap = {
+                old_index: new_index
+                for new_index, old_index
+                in enumerate(order)
+            }
+            ordered_centers = [
+                centers[index]
+                for index in order
+            ]
+            assignments = [
+                remap[index]
+                for index in assignments
+            ]
+
+            return assignments, ordered_centers
+
+        scores = [
+            row["activity_score"]
+            for row in records
+        ]
+        cluster_ids, centers = natural_clusters(
+            scores,
+            len(ACTIVITY_GROUP_NAMES),
         )
+
+        cluster_count = len(centers)
+
+        if cluster_count <= 1:
+            name_indexes = [0]
+        else:
+            # If the data genuinely contains fewer than five distinct natural
+            # levels, spread those levels across the available names rather
+            # than pretending that empty intermediate bands exist.
+            name_indexes = [
+                int(round(
+                    cluster_index
+                    * (
+                        len(ACTIVITY_GROUP_NAMES) - 1
+                    )
+                    / (cluster_count - 1)
+                ))
+                for cluster_index
+                in range(cluster_count)
+            ]
 
         members = {
             name: set()
             for name in ACTIVITY_GROUP_NAMES
         }
         record_by_user = {}
-        total_users = len(records)
 
-        for rank, row in enumerate(records):
-            group_index = min(
-                len(ACTIVITY_GROUP_NAMES) - 1,
-                int(
-                    rank
-                    * len(ACTIVITY_GROUP_NAMES)
-                    / max(1, total_users)
-                ),
-            )
-            group_name = ACTIVITY_GROUP_NAMES[group_index]
+        for row, cluster_index in zip(
+            records,
+            cluster_ids,
+        ):
+            group_name = ACTIVITY_GROUP_NAMES[
+                name_indexes[cluster_index]
+            ]
             row["group"] = group_name
-            row["rank_percent"] = (
-                (rank + 1) / total_users * 100
+            row["cluster_center"] = centers[
+                cluster_index
+            ]
+            members[group_name].add(
+                row["user_id"]
             )
-            members[group_name].add(row["user_id"])
-            record_by_user[row["user_id"]] = row
-
-        txs_by_user = defaultdict(list)
-        for tx in self.transactions:
-            txs_by_user[str(tx["user_id"])].append(tx)
+            record_by_user[
+                row["user_id"]
+            ] = row
 
         factor24 = self.get_24h_factor()
         factor30 = self.get_30_day_factor()
@@ -1931,14 +2133,12 @@ class EconomyAnalyzer:
                         "Avg 24h Game Net": 0,
                         "Avg 30d Game Net": 0,
                         "Avg Games / 24h": 0,
-                        "Most Played Game": "None",
-                        "Game Mix": "No game activity",
                     }
                 )
                 continue
 
             group_game_net = 0.0
-            game_rounds = defaultdict(float)
+            total_rounds = 0.0
 
             for user_id in group_users:
                 user_games = (
@@ -1961,13 +2161,12 @@ class EconomyAnalyzer:
                         tx["total"]
                         for tx in game_txs
                     )
-                    game_rounds[game] += self.estimate_game_rounds(
+                    total_rounds += self.estimate_game_rounds(
                         game,
                         game_txs,
                     )
 
             member_count = len(group_records)
-            total_rounds = sum(game_rounds.values())
             average_net = statistics.mean(
                 row["net"]
                 for row in group_records
@@ -1984,28 +2183,6 @@ class EconomyAnalyzer:
                 row["active_days"]
                 for row in group_records
             )
-
-            if game_rounds:
-                ordered_games = sorted(
-                    game_rounds.items(),
-                    key=lambda item: item[1],
-                    reverse=True,
-                )
-                most_played = GAME_DISPLAY[ordered_games[0][0]]
-                mix_parts = []
-                for game, rounds in ordered_games[:3]:
-                    share = (
-                        rounds / total_rounds * 100
-                        if total_rounds > 0
-                        else 0
-                    )
-                    mix_parts.append(
-                        f"{GAME_DISPLAY[game]} {share:.1f}%"
-                    )
-                game_mix = ", ".join(mix_parts)
-            else:
-                most_played = "None"
-                game_mix = "No game activity"
 
             stats.append(
                 {
@@ -2031,8 +2208,6 @@ class EconomyAnalyzer:
                         * factor24
                         / member_count
                     ),
-                    "Most Played Game": most_played,
-                    "Game Mix": game_mix,
                 }
             )
 
@@ -2105,43 +2280,79 @@ class EconomyAnalyzer:
             "group_rounds": group_rounds,
         }
 
+    def make_current_baseline_settings(
+        self,
+        settings,
+    ):
+        """Return settings where every proposed value equals the current value."""
+        baseline = copy.deepcopy(settings)
+
+        baseline["proposed_games_per_5m"] = (
+            baseline["current_games_per_5m"]
+        )
+        baseline["proposed_blackjack_decks"] = (
+            baseline["current_blackjack_decks"]
+        )
+        baseline["proposed_slot_symbols"] = (
+            baseline["current_slot_symbols"]
+        )
+        baseline["proposed_slot_multiplier"] = (
+            baseline["current_slot_multiplier"]
+        )
+        baseline["proposed_cockfight_start"] = (
+            baseline["current_cockfight_start"]
+        )
+        baseline["proposed_cockfight_max"] = (
+            baseline["current_cockfight_max"]
+        )
+        baseline["proposed_chicken_price"] = (
+            baseline["current_chicken_price"]
+        )
+
+        for game in BET_LIMIT_GAMES:
+            baseline["games"][game]["proposed"] = dict(
+                baseline["games"][game]["current"]
+            )
+
+        return baseline
+
     def evaluate_activity_group_monthly(
         self,
         settings,
         context,
         use_actual_game_mix=False,
     ):
-        """Estimate each activity group's monthly game result.
+        """Estimate monthly game profit using the exact simulator aggregate.
 
-        Every group uses the same server-wide average game result per play.
-        The only group-specific part is how much that group actually plays.
-        This prevents small or unusual group-specific game mixes from creating
-        extreme optimizer results. The use_actual_game_mix argument is kept
-        only for compatibility with older saved UI code and is ignored.
+        Every activity group uses the same server-wide average result per game
+        played. Groups differ only in how many games their members play. The
+        server-wide average is taken directly from simulation_scope(), so the
+        target panel and the 24-hour game table cannot use different models.
         """
-        factor30 = self.get_30_day_factor()
         predictions = {}
+        factor24 = self.get_24h_factor()
 
-        global_net = 0.0
-        global_rounds = 0.0
+        _, summary = self.simulation_scope(
+            settings
+        )
 
-        for game in GAME_ORDER:
-            txs = context["global_game_txs"][game]
-            if not txs:
-                continue
-
-            result = self.simulate_game(
-                game,
-                txs,
-                settings,
+        proposed_server_games_24h = float(
+            summary.get(
+                "24h_proposed_games",
+                0.0,
             )
-
-            global_net += result["proposed_net"]
-            global_rounds += result["proposed_rounds"]
+        )
+        proposed_server_net_24h = float(
+            summary.get(
+                "24h_proposed_net",
+                0.0,
+            )
+        )
 
         average_net_per_round = (
-            global_net / global_rounds
-            if global_rounds > 0
+            proposed_server_net_24h
+            / proposed_server_games_24h
+            if proposed_server_games_24h > 0
             else 0.0
         )
 
@@ -2165,19 +2376,24 @@ class EconomyAnalyzer:
                 predictions[group_name] = 0.0
                 continue
 
-            proposed_rounds = (
+            observed_group_games_24h = (
                 context["group_rounds"].get(
                     group_name,
                     0.0,
                 )
+                * factor24
+            )
+
+            proposed_games_per_member_24h = (
+                observed_group_games_24h
                 * activity_scale
+                / member_count
             )
 
             predictions[group_name] = (
                 average_net_per_round
-                * proposed_rounds
-                * factor30
-                / member_count
+                * proposed_games_per_member_24h
+                * 30.0
             )
 
         return predictions
@@ -2225,6 +2441,11 @@ class EconomyAnalyzer:
             # optimization. It may remain a high-risk / losing game and should
             # never become the optimizer's shortcut for funding every group.
             if game == "russian roulette":
+                continue
+
+            # Do not generate meaningless changes for games that nobody played
+            # in the selected history. Such settings cannot improve the target.
+            if not context["global_game_txs"].get(game):
                 continue
 
             for field in ("min", "max"):
@@ -2293,6 +2514,23 @@ class EconomyAnalyzer:
         ]
 
         for key, kind, lower, upper in extra_specs:
+            if key in {
+                "proposed_slot_symbols",
+                "proposed_slot_multiplier",
+            } and not context["global_game_txs"].get(
+                "slot machine"
+            ):
+                continue
+
+            if key in {
+                "proposed_cockfight_start",
+                "proposed_cockfight_max",
+                "proposed_chicken_price",
+            } and not context["global_game_txs"].get(
+                "cockfight"
+            ):
+                continue
+
             if key not in locked_keys:
                 specs.append(
                     {
@@ -2713,11 +2951,21 @@ class EconomyAnalyzer:
                     (current_value - base_value) / scale
                 ) ** 2
 
+            # When the target is still far away, prioritize actually
+            # moving toward it. Once the target is reasonably close, increase
+            # the weight on keeping the normal games balanced and relevant.
+            if target_error > 0.10:
+                balance_weight = 0.06
+            elif target_error > 0.02:
+                balance_weight = 0.12
+            else:
+                balance_weight = 0.22
+
             score = (
                 target_error
-                + 0.40
+                + balance_weight
                 * balance["penalty"]
-                + 0.002
+                + 0.0005
                 * change_penalty
             )
 
@@ -2728,6 +2976,70 @@ class EconomyAnalyzer:
 
         best_predictions, best_score = predictions_and_score(best)
         evaluations = 1
+
+        # Coordinate descent alone can get stuck when several settings need to
+        # move together before the target becomes better. Try a deterministic
+        # set of joint candidates first, then polish the best one below.
+        rng = random.Random(67)
+
+        for iteration in range(700):
+            if iteration < 250:
+                candidate = copy.deepcopy(base)
+                global_strength = 1.0
+            else:
+                candidate = copy.deepcopy(best)
+                progress = (
+                    iteration - 250
+                ) / 450.0
+                global_strength = max(
+                    0.08,
+                    0.55 * (1.0 - progress),
+                )
+
+            for spec in specs:
+                if rng.random() > 0.55:
+                    continue
+
+                current_value = get_value(
+                    candidate,
+                    spec,
+                )
+
+                if iteration < 250 and rng.random() < 0.45:
+                    candidate_value = rng.uniform(
+                        spec["min"],
+                        spec["max"],
+                    )
+                else:
+                    span = (
+                        spec["max"]
+                        - spec["min"]
+                    )
+                    candidate_value = (
+                        current_value
+                        + rng.uniform(-1.0, 1.0)
+                        * span
+                        * global_strength
+                    )
+
+                set_value(
+                    candidate,
+                    spec,
+                    candidate_value,
+                )
+
+            if not valid(candidate):
+                continue
+
+            predictions, score = predictions_and_score(
+                candidate
+            )
+            evaluations += 1
+
+            if score + 1e-12 < best_score:
+                best = candidate
+                best_score = score
+                best_predictions = predictions
 
         phase_fractions = [
             0.50,
@@ -2808,6 +3120,33 @@ class EconomyAnalyzer:
             best
         )
 
+        changed_settings = []
+        for spec in specs:
+            before = get_value(base, spec)
+            after = get_value(best, spec)
+            if not math.isclose(
+                float(before),
+                float(after),
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            ):
+                changed_settings.append(
+                    spec["key"]
+                )
+
+        relative_misses = [
+            abs(
+                best_predictions[group_name]
+                - float(target)
+            )
+            / max(
+                1000.0,
+                abs(float(target)),
+            )
+            for group_name, target
+            in targets.items()
+        ]
+
         return {
             "settings": best,
             "predictions": best_predictions,
@@ -2820,6 +3159,12 @@ class EconomyAnalyzer:
             "evaluations": evaluations,
             "context": context,
             "game_balance": final_balance,
+            "changed_settings": changed_settings,
+            "max_relative_miss": (
+                max(relative_misses)
+                if relative_misses
+                else 0.0
+            ),
         }
 
     def build_reason_stats(self):
@@ -5605,6 +5950,10 @@ class DataTable(
         self.page_size = 1000
         self.page_index = 0
         self._filter_after_id = None
+        self.max_visible_rows = max(
+            1,
+            int(height),
+        )
 
         self.double_click_callback = (
             double_click_callback
@@ -6070,6 +6419,62 @@ class DataTable(
             self.count_label.config(
                 text="0 rows"
             )
+
+        self.auto_fit_height(
+            len(visible_rows)
+        )
+
+    def auto_fit_height(
+        self,
+        visible_row_count,
+    ):
+        """Shrink small tables instead of leaving a large empty rectangle."""
+        desired_rows = max(
+            1,
+            min(
+                self.max_visible_rows,
+                int(visible_row_count),
+            ),
+        )
+
+        self.tree.configure(
+            height=desired_rows
+        )
+
+        try:
+            self.update_idletasks()
+
+            panel = self.master.master
+            if isinstance(
+                panel,
+                RoundedPanel,
+            ):
+                requested_inner_height = (
+                    self.master.winfo_reqheight()
+                )
+
+                desired_panel_height = max(
+                    105,
+                    requested_inner_height
+                    + panel.padding * 2,
+                )
+
+                current_height = int(
+                    float(
+                        panel.cget("height")
+                    )
+                )
+
+                if current_height != int(
+                    desired_panel_height
+                ):
+                    panel.configure(
+                        height=int(
+                            desired_panel_height
+                        )
+                    )
+        except Exception:
+            pass
 
     def schedule_filter(
         self,
@@ -8040,8 +8445,9 @@ class EconomyViewer:
         self.activity_group_help_card = self.make_help_card(
             page,
             (
-                "Users are split into five rank-based activity groups. Combined activity uses both estimated active hours and number of balance changes. "
-                "You can also rank only by active hours or only by transactions. The groups adapt to the users in the currently selected database window."
+                "Users are grouped by natural activity levels instead of forcing the same number of people into every group. "
+                "Combined activity uses both estimated active hours per day and balance changes per day. You can also group only by active hours or only by transactions. "
+                "A server with many casual users and only a few heavy users will therefore have many more people in the casual groups than in the very active groups."
             ),
             height=130,
         )
@@ -8156,8 +8562,8 @@ class EconomyViewer:
 
         self.activity_group_help_card.set_text(
             (
-                f"The current grouping uses {basis.lower()}. Users are ranked against each other and divided into five bands, so the cutoffs automatically adapt when the selected dates or filters change. "
-                "'Very Casual' is the lowest activity band and 'Very Active' is the highest. This is a relative ranking, not a fixed number of hours that will be the same in every database.\n\n"
+                f"The current grouping uses {basis.lower()}. The program looks for natural clusters in how intensely people actually use the economy instead of putting exactly 20% of users into each label. "
+                "That means the group sizes are expected to be uneven. 'Very Casual' is the lowest natural activity level and 'Very Active' is the highest. The boundaries adapt when the selected dates or filters change.\n\n"
                 f"A typical {quietest['Group']} member has about {quietest['Avg Active Hrs']:,.2f} estimated active hours and {quietest['Avg Transactions']:,.1f} balance changes during the selected window. "
                 f"At the same overall pace they would {money_words(quietest['Avg 24h Net'], '24 hours')} and {money_words(quietest['Avg 30d Net'], '30 days')}. "
                 f"Looking only at the games that the simulator can change, their 30-day game result is {quietest['Avg 30d Game Net']:+,.0f}. Their most-played game is {quietest['Most Played Game']}.\n\n"
@@ -9048,7 +9454,7 @@ class EconomyViewer:
             text=(
                 "Choose one or more activity groups, enter how much you want an average member to gain or lose from games over 30 days, then let the program search for nearby settings. "
                 "You can select a group by clicking its checkbox or group name. Typing a target automatically selects that group. "
-                "All activity groups use the same server-wide average game result. The optimizer also tries to keep Blackjack, Cock Fight, Roulette, Slot Machine and Higher or Lower beneficial and relevant instead of making one game carry the whole economy. "
+                "All activity groups use the exact same server-wide average result per game played that is calculated by the 24-hour game simulation. The optimizer also tries to keep Blackjack, Cock Fight, Roulette, Slot Machine and Higher or Lower beneficial and relevant instead of making one game carry the whole economy. "
                 "Russian Roulette is intentionally excluded from that balancing goal and is not automatically changed. Locked values are never changed."
             ),
             bg=CARD,
@@ -11232,8 +11638,11 @@ class EconomyViewer:
         context = self.analyzer.prepare_activity_optimizer_context(
             basis
         )
+        baseline_settings = self.analyzer.make_current_baseline_settings(
+            settings
+        )
         predictions = self.analyzer.evaluate_activity_group_monthly(
-            settings,
+            baseline_settings,
             context,
             use_actual_game_mix=False,
         )
@@ -11372,6 +11781,23 @@ class EconomyViewer:
                 result["settings"]
             )
 
+            # Run the same simulation that fills the 24-hour game table first.
+            # Then recalculate the target rows from the values actually present
+            # in the UI. This guarantees that the target result and game table
+            # are using the same settings and the same simulation model.
+            self.mark_sim_dirty()
+            self.run_simulator()
+
+            actual_settings = self.get_simulator_settings()
+            actual_context = self.analyzer.prepare_activity_optimizer_context(
+                basis
+            )
+            actual_predictions = self.analyzer.evaluate_activity_group_monthly(
+                actual_settings,
+                actual_context,
+                use_actual_game_mix=False,
+            )
+
             for group_name in ACTIVITY_GROUP_NAMES:
                 result_label = self.sim_target_result_labels.get(
                     group_name
@@ -11380,7 +11806,7 @@ class EconomyViewer:
                     continue
 
                 if group_name in targets:
-                    predicted = result["predictions"][group_name]
+                    predicted = actual_predictions[group_name]
                     target = targets[group_name]
                     miss = predicted - target
                     result_label.config(
@@ -11394,6 +11820,9 @@ class EconomyViewer:
                         text="Not targeted",
                         fg=MUTED,
                     )
+
+            # Keep the returned values aligned with what is actually shown.
+            result["predictions"] = actual_predictions
 
             game_balance = result.get(
                 "game_balance",
@@ -11421,10 +11850,53 @@ class EconomyViewer:
                 * 100.0
             )
 
+            changed_count = len(
+                result.get(
+                    "changed_settings",
+                    [],
+                )
+            )
+
+            actual_misses = [
+                abs(
+                    actual_predictions[group_name]
+                    - float(target)
+                )
+                for group_name, target
+                in targets.items()
+            ]
+            actual_average_miss = (
+                statistics.mean(actual_misses)
+                if actual_misses
+                else 0.0
+            )
+            actual_relative_miss = max(
+                (
+                    abs(
+                        actual_predictions[group_name]
+                        - float(target)
+                    )
+                    / max(
+                        1000.0,
+                        abs(float(target)),
+                    )
+                    for group_name, target
+                    in targets.items()
+                ),
+                default=0.0,
+            )
+
+            reach_text = (
+                "The requested target is still far outside what the optimizer could reach with the unlocked settings and balance rules. "
+                if actual_relative_miss > 0.15
+                else "The optimized result is reasonably close to the requested target. "
+            )
+
             self.sim_optimizer_status_label.config(
                 text=(
-                    f"Finished after {result['evaluations']:,} setting checks. The average absolute miss across the selected targets is about {result['average_absolute_miss']:,.0f} per month. "
-                    f"{profitable_games} of {balanced_game_count} normal configurable games finish positive for players in the selected history under these settings. "
+                    f"Finished after {result['evaluations']:,} setting checks and changed {changed_count} unlocked setting{'s' if changed_count != 1 else ''}. The actual average miss after re-running the normal simulator is about {actual_average_miss:,.0f} per month. "
+                    + reach_text
+                    + f"{profitable_games} of {balanced_game_count} normal configurable games finish positive for players in the selected history under these settings. "
                     + (
                         f"The single largest game supplies about {largest_share:,.1f}% of the positive improvement. "
                         if largest_share > 0
@@ -11436,9 +11908,6 @@ class EconomyViewer:
                     "Blackjack deck count is not auto-tuned because this program does not claim an exact profit change from deck count alone, and Animal Race has no normal global min/max bet setting to tune."
                 )
             )
-
-            self.mark_sim_dirty()
-            self.run_simulator()
 
         except Exception as error:
             messagebox.showerror(
