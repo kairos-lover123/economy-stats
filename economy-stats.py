@@ -609,6 +609,16 @@ DISCORD_HEADER_NAMES = {
     "Avg Active Days / 30d": "Days/30d",
     "Avg 24h Net": "24h Net",
     "Avg 30d Net": "30d Net",
+    "Users Played": "Players",
+    "Participation %": "Play %",
+    "Avg Plays / Member / Day": "Plays/m/day",
+    "Avg Plays / Player / Day": "Plays/p/day",
+    "Avg Bet": "Avg Bet",
+    "Net / Play": "Net/play",
+    "Avg 24h Net / Member": "Net/m/24h",
+    "Avg 30d Net / Member": "Net/m/30d",
+    "Active Hrs / Day": "Hrs/day",
+    "Transactions / Day": "Tx/day",
 }
 
 
@@ -2347,6 +2357,341 @@ class EconomyAnalyzer:
             )
 
         return stats, members
+
+    def get_activity_group_details(
+        self,
+        group_name,
+        basis="Combined activity",
+    ):
+        """Return detailed historical averages for one natural activity group.
+
+        These statistics are descriptive history only. They show what users in
+        the selected group actually did during the selected database window.
+        The Game Simulator still ignores historical game popularity and uses
+        the fixed plays-per-five-active-minutes assumption instead.
+        """
+        group_rows, members = (
+            self.get_activity_groups(
+                basis
+            )
+        )
+
+        group_users = set(
+            members.get(
+                group_name,
+                set(),
+            )
+        )
+
+        group_summary = next(
+            (
+                row
+                for row in group_rows
+                if row.get(
+                    "Group"
+                ) == group_name
+            ),
+            None,
+        )
+
+        if (
+            not group_summary
+            or not group_users
+        ):
+            return {
+                "group": group_name,
+                "members": 0,
+                "summary": group_summary,
+                "game_rows": [],
+                "member_rows": [],
+                "avg_game_plays_per_member_day": 0.0,
+                "avg_game_net_per_member_24h": 0.0,
+                "avg_game_net_per_member_30d": 0.0,
+            }
+
+        analysis_days = max(
+            self.get_analysis_days(),
+            1.0 / 24.0,
+        )
+        factor24 = self.get_24h_factor()
+        factor30 = self.get_30_day_factor()
+        member_count = len(
+            group_users
+        )
+
+        total_game_net = 0.0
+        total_game_rounds = 0.0
+
+        game_rows = []
+
+        for game in GAME_ORDER:
+            txs = []
+            players = set()
+
+            for user_id in group_users:
+                game_txs = (
+                    self.user_game_transactions
+                    .get(
+                        str(user_id),
+                        {},
+                    )
+                    .get(
+                        game,
+                        [],
+                    )
+                )
+
+                if game_txs:
+                    players.add(
+                        str(user_id)
+                    )
+                    txs.extend(
+                        game_txs
+                    )
+
+            player_count = len(
+                players
+            )
+
+            net = sum(
+                tx["total"]
+                for tx in txs
+            )
+            earned = sum(
+                tx["total"]
+                for tx in txs
+                if tx["total"] > 0
+            )
+            lost = -sum(
+                tx["total"]
+                for tx in txs
+                if tx["total"] < 0
+            )
+
+            rounds = (
+                self.estimate_game_rounds(
+                    game,
+                    txs,
+                )
+                if txs
+                else 0.0
+            )
+
+            bets = (
+                self.infer_game_bets(
+                    game,
+                    txs,
+                    DEFAULT_SLOT_MULTIPLIER,
+                )
+                if txs
+                else []
+            )
+
+            average_bet = (
+                statistics.mean(
+                    bets
+                )
+                if bets
+                else 0.0
+            )
+
+            total_game_net += net
+            total_game_rounds += rounds
+
+            game_rows.append(
+                {
+                    "Game":
+                        GAME_DISPLAY[
+                            game
+                        ],
+                    "Users Played":
+                        player_count,
+                    "Participation %":
+                        (
+                            player_count
+                            / member_count
+                            * 100.0
+                            if member_count
+                            else 0.0
+                        ),
+                    "Avg Plays / Member / Day":
+                        (
+                            rounds
+                            / analysis_days
+                            / member_count
+                            if member_count
+                            else 0.0
+                        ),
+                    "Avg Plays / Player / Day":
+                        (
+                            rounds
+                            / analysis_days
+                            / player_count
+                            if player_count
+                            else 0.0
+                        ),
+                    "Avg Bet":
+                        average_bet,
+                    "Net / Play":
+                        (
+                            net
+                            / rounds
+                            if rounds
+                            else 0.0
+                        ),
+                    "Avg 24h Net / Member":
+                        (
+                            net
+                            * factor24
+                            / member_count
+                            if member_count
+                            else 0.0
+                        ),
+                    "Avg 30d Net / Member":
+                        (
+                            net
+                            * factor30
+                            / member_count
+                            if member_count
+                            else 0.0
+                        ),
+                }
+            )
+
+        game_rows.sort(
+            key=lambda row:
+                row[
+                    "Avg Plays / Member / Day"
+                ],
+            reverse=True,
+        )
+
+        user_stats_by_id = {
+            str(row["User ID"]):
+                row
+            for row in self.user_stats
+        }
+
+        member_rows = []
+
+        for user_id in group_users:
+            row = user_stats_by_id.get(
+                str(user_id)
+            )
+
+            if row is None:
+                continue
+
+            member_rows.append(
+                {
+                    "User ID":
+                        str(user_id),
+                    "Active Hrs / Day":
+                        (
+                            float(
+                                row[
+                                    "Est. Active Hrs"
+                                ]
+                            )
+                            / analysis_days
+                        ),
+                    "Transactions / Day":
+                        (
+                            float(
+                                row[
+                                    "Transactions"
+                                ]
+                            )
+                            / analysis_days
+                        ),
+                    "24h Net":
+                        (
+                            float(
+                                row[
+                                    "Net Profit"
+                                ]
+                            )
+                            * factor24
+                        ),
+                    "30d Net":
+                        (
+                            float(
+                                row[
+                                    "Net Profit"
+                                ]
+                            )
+                            * factor30
+                        ),
+                    "Top Income Source":
+                        row.get(
+                            "Top Income Source",
+                            "None",
+                        ),
+                    "Sessions":
+                        int(
+                            row.get(
+                                "Sessions",
+                                0,
+                            )
+                        ),
+                    "Active Days":
+                        int(
+                            row.get(
+                                "Active Days",
+                                0,
+                            )
+                        ),
+                }
+            )
+
+        member_rows.sort(
+            key=lambda row: (
+                row[
+                    "Active Hrs / Day"
+                ],
+                row[
+                    "Transactions / Day"
+                ],
+            ),
+            reverse=True,
+        )
+
+        return {
+            "group":
+                group_name,
+            "members":
+                member_count,
+            "summary":
+                group_summary,
+            "game_rows":
+                game_rows,
+            "member_rows":
+                member_rows,
+            "avg_game_plays_per_member_day":
+                (
+                    total_game_rounds
+                    / analysis_days
+                    / member_count
+                    if member_count
+                    else 0.0
+                ),
+            "avg_game_net_per_member_24h":
+                (
+                    total_game_net
+                    * factor24
+                    / member_count
+                    if member_count
+                    else 0.0
+                ),
+            "avg_game_net_per_member_30d":
+                (
+                    total_game_net
+                    * factor30
+                    / member_count
+                    if member_count
+                    else 0.0
+                ),
+        }
 
     def prepare_activity_optimizer_context(
         self,
@@ -7617,6 +7962,13 @@ class DataTable(
 
         if {
             "Game",
+            "Users Played",
+            "Avg Plays / Member / Day",
+        }.issubset(columns):
+            return "Activity Group Game Averages"
+
+        if {
+            "Game",
             "24h Current Net",
             "24h Proposed Net",
         }.issubset(columns):
@@ -7835,10 +8187,10 @@ class DataTable(
 
         prefix = (
             f"**{title}**"
-            f"{page_note}\\n"
-            "```text\\n"
+            f"{page_note}\n"
+            "```text\n"
         )
-        suffix = "\\n```"
+        suffix = "\n```"
 
         kept_lines = []
         trimmed_count = 0
@@ -7853,7 +8205,7 @@ class DataTable(
 
             candidate = (
                 prefix
-                + "\\n".join(
+                + "\n".join(
                     candidate_lines
                 )
                 + suffix
@@ -7883,7 +8235,7 @@ class DataTable(
 
         result = (
             prefix
-            + "\\n".join(
+            + "\n".join(
                 body_lines
             )
             + suffix
@@ -7913,12 +8265,12 @@ class DataTable(
                 )
 
             result = (
-                f"**{title}**\\n"
-                "```text\\n"
-                + "\\n".join(
+                f"**{title}**\n"
+                "```text\n"
+                + "\n".join(
                     compact_lines
                 )
-                + "\\n```"
+                + "\n```"
             )
 
         return discord_trim_message(
@@ -8090,6 +8442,1210 @@ class DataTable(
             writer.writerows(
                 self.filtered_data
             )
+
+
+class PlotCanvas(tk.Frame):
+    """Lightweight chart renderer using only Tkinter.
+
+    This keeps the project dependency-free while still supporting useful bar,
+    line, scatter and histogram plots inside the desktop app.
+    """
+    def __init__(
+        self,
+        parent,
+        height=500,
+    ):
+        super().__init__(
+            parent,
+            bg=CARD,
+        )
+
+        self.default_height = int(
+            height
+        )
+        self.plot_rows = []
+        self.chart_type = "Bar"
+        self.x_label = ""
+        self.y_labels = []
+        self.title = ""
+        self.message = (
+            "Choose what to plot, then press Plot."
+        )
+
+        self.canvas = tk.Canvas(
+            self,
+            bg=CARD,
+            highlightthickness=0,
+            bd=0,
+            height=self.default_height,
+        )
+        self.canvas.pack(
+            fill=tk.BOTH,
+            expand=True,
+        )
+        self.canvas.bind(
+            "<Configure>",
+            lambda event:
+                self.redraw(),
+        )
+
+    def set_message(
+        self,
+        message,
+    ):
+        self.message = str(
+            message
+        )
+        self.plot_rows = []
+        self.redraw()
+
+    def set_plot(
+        self,
+        rows,
+        chart_type,
+        x_label,
+        y_labels,
+        title,
+    ):
+        self.plot_rows = list(
+            rows
+        )
+        self.chart_type = str(
+            chart_type
+        )
+        self.x_label = str(
+            x_label
+        )
+        self.y_labels = list(
+            y_labels
+        )
+        self.title = str(
+            title
+        )
+        self.message = ""
+        self.redraw()
+
+    def compact_number(
+        self,
+        value,
+    ):
+        try:
+            number = float(
+                value
+            )
+        except Exception:
+            return str(
+                value
+            )
+
+        absolute = abs(
+            number
+        )
+
+        if absolute >= 1_000_000_000:
+            return (
+                f"{number / 1_000_000_000:.1f}B"
+            )
+        if absolute >= 1_000_000:
+            return (
+                f"{number / 1_000_000:.1f}M"
+            )
+        if absolute >= 10_000:
+            return (
+                f"{number / 1_000:.1f}K"
+            )
+        if absolute >= 1_000:
+            return f"{number:,.0f}"
+        if absolute >= 100:
+            return f"{number:,.1f}"
+        return f"{number:,.2f}"
+
+    def _draw_text(
+        self,
+        x,
+        y,
+        text,
+        **kwargs,
+    ):
+        defaults = {
+            "fill": TEXT,
+            "font": (
+                "Segoe UI",
+                9,
+            ),
+        }
+        defaults.update(
+            kwargs
+        )
+        self.canvas.create_text(
+            x,
+            y,
+            text=text,
+            **defaults,
+        )
+
+    def _series_colors(self):
+        return [
+            PRIMARY,
+            ACCENT_TEXT,
+        ]
+
+    def redraw(self):
+        self.canvas.delete(
+            "all"
+        )
+
+        width = max(
+            300,
+            self.canvas.winfo_width(),
+        )
+        height = max(
+            260,
+            self.canvas.winfo_height(),
+        )
+
+        if not self.plot_rows:
+            self._draw_text(
+                width / 2,
+                height / 2,
+                self.message
+                or "No plot data",
+                fill=MUTED,
+                font=(
+                    "Segoe UI",
+                    11,
+                ),
+                width=max(
+                    260,
+                    width - 100,
+                ),
+                justify=tk.CENTER,
+            )
+            return
+
+        if self.title:
+            self._draw_text(
+                24,
+                18,
+                self.title,
+                anchor="nw",
+                font=(
+                    "Bahnschrift",
+                    12,
+                    "bold",
+                ),
+            )
+
+        if self.chart_type == "Histogram":
+            self._draw_histogram(
+                width,
+                height,
+            )
+        elif self.chart_type == "Scatter":
+            self._draw_scatter(
+                width,
+                height,
+            )
+        elif self.chart_type == "Line":
+            self._draw_line(
+                width,
+                height,
+            )
+        else:
+            self._draw_bar(
+                width,
+                height,
+            )
+
+    def _plot_area(
+        self,
+        width,
+        height,
+    ):
+        left = 82
+        right = 30
+        top = 58
+        bottom = 100
+
+        return (
+            left,
+            top,
+            max(
+                left + 40,
+                width - right,
+            ),
+            max(
+                top + 40,
+                height - bottom,
+            ),
+        )
+
+    def _draw_y_axis(
+        self,
+        x0,
+        y0,
+        x1,
+        y1,
+        minimum,
+        maximum,
+        force_zero=False,
+    ):
+        if force_zero:
+            minimum = min(
+                minimum,
+                0.0,
+            )
+            maximum = max(
+                maximum,
+                0.0,
+            )
+
+        if math.isclose(
+            minimum,
+            maximum,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            pad = max(
+                1.0,
+                abs(minimum) * 0.1,
+            )
+            minimum -= pad
+            maximum += pad
+
+        span = maximum - minimum
+        pad = span * 0.08
+        minimum -= pad
+        maximum += pad
+        span = maximum - minimum
+
+        ticks = 5
+
+        for index in range(
+            ticks + 1
+        ):
+            fraction = (
+                index / ticks
+            )
+            value = (
+                maximum
+                - fraction * span
+            )
+            y = (
+                y0
+                + fraction
+                * (y1 - y0)
+            )
+
+            self.canvas.create_line(
+                x0,
+                y,
+                x1,
+                y,
+                fill=BORDER,
+                width=1,
+            )
+            self._draw_text(
+                x0 - 10,
+                y,
+                self.compact_number(
+                    value
+                ),
+                anchor="e",
+                fill=MUTED,
+                font=(
+                    "Segoe UI",
+                    8,
+                ),
+            )
+
+        self.canvas.create_line(
+            x0,
+            y0,
+            x0,
+            y1,
+            fill=MUTED,
+            width=1,
+        )
+        self.canvas.create_line(
+            x0,
+            y1,
+            x1,
+            y1,
+            fill=MUTED,
+            width=1,
+        )
+
+        def y_for(value):
+            return (
+                y1
+                - (
+                    (float(value) - minimum)
+                    / span
+                )
+                * (y1 - y0)
+            )
+
+        return (
+            y_for,
+            minimum,
+            maximum,
+        )
+
+    def _draw_axis_titles(
+        self,
+        x0,
+        y0,
+        x1,
+        y1,
+    ):
+        if self.x_label:
+            self._draw_text(
+                (x0 + x1) / 2,
+                y1 + 76,
+                self.x_label,
+                fill=MUTED,
+                font=(
+                    "Bahnschrift",
+                    9,
+                    "bold",
+                ),
+            )
+
+        if self.y_labels:
+            label = " / ".join(
+                self.y_labels
+            )
+            self._draw_text(
+                18,
+                (y0 + y1) / 2,
+                label,
+                fill=MUTED,
+                font=(
+                    "Bahnschrift",
+                    9,
+                    "bold",
+                ),
+                angle=90,
+            )
+
+    def _draw_legend(
+        self,
+        width,
+    ):
+        if len(
+            self.y_labels
+        ) <= 1:
+            return
+
+        colors = self._series_colors()
+        x = max(
+            120,
+            width - 300,
+        )
+        y = 26
+
+        for index, label in enumerate(
+            self.y_labels[:2]
+        ):
+            color = colors[
+                index
+            ]
+            self.canvas.create_rectangle(
+                x,
+                y - 6,
+                x + 14,
+                y + 6,
+                fill=color,
+                outline="",
+            )
+            self._draw_text(
+                x + 20,
+                y,
+                label,
+                anchor="w",
+                fill=MUTED,
+                font=(
+                    "Segoe UI",
+                    8,
+                ),
+            )
+            x += max(
+                110,
+                len(label) * 7 + 40,
+            )
+
+    def _category_label_indices(
+        self,
+        count,
+    ):
+        if count <= 12:
+            return set(
+                range(count)
+            )
+
+        step = max(
+            1,
+            math.ceil(
+                count / 12
+            ),
+        )
+
+        indices = set(
+            range(
+                0,
+                count,
+                step,
+            )
+        )
+        indices.add(
+            count - 1
+        )
+        return indices
+
+    def _draw_bar(
+        self,
+        width,
+        height,
+    ):
+        x0, y0, x1, y1 = (
+            self._plot_area(
+                width,
+                height,
+            )
+        )
+
+        values = []
+        for row in self.plot_rows:
+            values.append(
+                float(row["y1"])
+            )
+            if row.get(
+                "y2"
+            ) is not None:
+                values.append(
+                    float(row["y2"])
+                )
+
+        y_for, minimum, maximum = (
+            self._draw_y_axis(
+                x0,
+                y0,
+                x1,
+                y1,
+                min(values),
+                max(values),
+                force_zero=True,
+            )
+        )
+
+        zero_y = y_for(
+            0.0
+        )
+        colors = self._series_colors()
+        count = len(
+            self.plot_rows
+        )
+        slot = (
+            (x1 - x0)
+            / max(
+                1,
+                count,
+            )
+        )
+        has_second = any(
+            row.get(
+                "y2"
+            ) is not None
+            for row in self.plot_rows
+        )
+        group_width = min(
+            slot * 0.76,
+            52,
+        )
+        bar_width = (
+            group_width / 2
+            if has_second
+            else group_width
+        )
+
+        label_indices = (
+            self._category_label_indices(
+                count
+            )
+        )
+
+        for index, row in enumerate(
+            self.plot_rows
+        ):
+            center = (
+                x0
+                + slot * (
+                    index + 0.5
+                )
+            )
+
+            series_values = [
+                row["y1"]
+            ]
+            if has_second:
+                series_values.append(
+                    row.get(
+                        "y2",
+                        0.0,
+                    )
+                )
+
+            for series_index, value in enumerate(
+                series_values
+            ):
+                if value is None:
+                    continue
+
+                if has_second:
+                    left = (
+                        center
+                        - group_width / 2
+                        + series_index
+                        * bar_width
+                    )
+                else:
+                    left = (
+                        center
+                        - bar_width / 2
+                    )
+
+                right = (
+                    left
+                    + max(
+                        2,
+                        bar_width - 2,
+                    )
+                )
+                value_y = y_for(
+                    float(value)
+                )
+
+                self.canvas.create_rectangle(
+                    left,
+                    min(
+                        zero_y,
+                        value_y,
+                    ),
+                    right,
+                    max(
+                        zero_y,
+                        value_y,
+                    ),
+                    fill=colors[
+                        min(
+                            series_index,
+                            len(colors) - 1,
+                        )
+                    ],
+                    outline="",
+                )
+
+            if index in label_indices:
+                label = str(
+                    row["x"]
+                )
+                if len(label) > 18:
+                    label = (
+                        label[:17]
+                        + "…"
+                    )
+                self._draw_text(
+                    center,
+                    y1 + 12,
+                    label,
+                    anchor="ne",
+                    fill=MUTED,
+                    font=(
+                        "Segoe UI",
+                        8,
+                    ),
+                    angle=45,
+                )
+
+        self._draw_axis_titles(
+            x0,
+            y0,
+            x1,
+            y1,
+        )
+        self._draw_legend(
+            width
+        )
+
+    def _line_x_positions(
+        self,
+        x0,
+        x1,
+    ):
+        numeric = all(
+            isinstance(
+                row.get(
+                    "x_numeric"
+                ),
+                (
+                    int,
+                    float,
+                ),
+            )
+            for row in self.plot_rows
+        )
+
+        if numeric:
+            values = [
+                float(
+                    row[
+                        "x_numeric"
+                    ]
+                )
+                for row in self.plot_rows
+            ]
+            minimum = min(
+                values
+            )
+            maximum = max(
+                values
+            )
+
+            if math.isclose(
+                minimum,
+                maximum,
+            ):
+                return [
+                    (x0 + x1) / 2
+                    for _ in values
+                ]
+
+            return [
+                x0
+                + (
+                    value - minimum
+                )
+                / (
+                    maximum - minimum
+                )
+                * (
+                    x1 - x0
+                )
+                for value in values
+            ]
+
+        count = len(
+            self.plot_rows
+        )
+        if count <= 1:
+            return [
+                (x0 + x1) / 2
+            ]
+
+        return [
+            x0
+            + index
+            / (
+                count - 1
+            )
+            * (
+                x1 - x0
+            )
+            for index in range(
+                count
+            )
+        ]
+
+    def _draw_line(
+        self,
+        width,
+        height,
+    ):
+        x0, y0, x1, y1 = (
+            self._plot_area(
+                width,
+                height,
+            )
+        )
+
+        values = []
+        for row in self.plot_rows:
+            values.append(
+                float(row["y1"])
+            )
+            if row.get(
+                "y2"
+            ) is not None:
+                values.append(
+                    float(row["y2"])
+                )
+
+        y_for, _, _ = (
+            self._draw_y_axis(
+                x0,
+                y0,
+                x1,
+                y1,
+                min(values),
+                max(values),
+                force_zero=False,
+            )
+        )
+        xs = self._line_x_positions(
+            x0,
+            x1,
+        )
+        colors = self._series_colors()
+        has_second = any(
+            row.get(
+                "y2"
+            ) is not None
+            for row in self.plot_rows
+        )
+
+        series_keys = [
+            "y1"
+        ]
+        if has_second:
+            series_keys.append(
+                "y2"
+            )
+
+        for series_index, key in enumerate(
+            series_keys
+        ):
+            points = []
+
+            for index, row in enumerate(
+                self.plot_rows
+            ):
+                value = row.get(
+                    key
+                )
+                if value is None:
+                    continue
+                points.extend(
+                    [
+                        xs[index],
+                        y_for(
+                            float(value)
+                        ),
+                    ]
+                )
+
+            if len(points) >= 4:
+                self.canvas.create_line(
+                    *points,
+                    fill=colors[
+                        series_index
+                    ],
+                    width=2,
+                    smooth=False,
+                )
+
+            for index, row in enumerate(
+                self.plot_rows
+            ):
+                value = row.get(
+                    key
+                )
+                if value is None:
+                    continue
+                px = xs[index]
+                py = y_for(
+                    float(value)
+                )
+                radius = 3
+                self.canvas.create_oval(
+                    px - radius,
+                    py - radius,
+                    px + radius,
+                    py + radius,
+                    fill=colors[
+                        series_index
+                    ],
+                    outline="",
+                )
+
+        label_indices = (
+            self._category_label_indices(
+                len(self.plot_rows)
+            )
+        )
+        for index, row in enumerate(
+            self.plot_rows
+        ):
+            if index not in label_indices:
+                continue
+            label = str(
+                row["x"]
+            )
+            if len(label) > 18:
+                label = (
+                    label[:17]
+                    + "…"
+                )
+            self._draw_text(
+                xs[index],
+                y1 + 12,
+                label,
+                anchor="ne",
+                fill=MUTED,
+                font=(
+                    "Segoe UI",
+                    8,
+                ),
+                angle=45,
+            )
+
+        self._draw_axis_titles(
+            x0,
+            y0,
+            x1,
+            y1,
+        )
+        self._draw_legend(
+            width
+        )
+
+    def _draw_scatter(
+        self,
+        width,
+        height,
+    ):
+        x0, y0, x1, y1 = (
+            self._plot_area(
+                width,
+                height,
+            )
+        )
+
+        x_values = [
+            float(
+                row["x_numeric"]
+            )
+            for row in self.plot_rows
+        ]
+        y_values = [
+            float(
+                row["y1"]
+            )
+            for row in self.plot_rows
+        ]
+
+        if any(
+            row.get(
+                "y2"
+            ) is not None
+            for row in self.plot_rows
+        ):
+            y_values.extend(
+                float(
+                    row["y2"]
+                )
+                for row in self.plot_rows
+                if row.get(
+                    "y2"
+                ) is not None
+            )
+
+        y_for, _, _ = (
+            self._draw_y_axis(
+                x0,
+                y0,
+                x1,
+                y1,
+                min(y_values),
+                max(y_values),
+                force_zero=False,
+            )
+        )
+
+        xmin = min(
+            x_values
+        )
+        xmax = max(
+            x_values
+        )
+        if math.isclose(
+            xmin,
+            xmax,
+        ):
+            xmin -= 1
+            xmax += 1
+
+        xpad = (
+            xmax - xmin
+        ) * 0.05
+        xmin -= xpad
+        xmax += xpad
+
+        def x_for(value):
+            return (
+                x0
+                + (
+                    float(value) - xmin
+                )
+                / (
+                    xmax - xmin
+                )
+                * (
+                    x1 - x0
+                )
+            )
+
+        for tick in range(6):
+            fraction = tick / 5
+            value = (
+                xmin
+                + fraction
+                * (xmax - xmin)
+            )
+            x = (
+                x0
+                + fraction
+                * (x1 - x0)
+            )
+            self.canvas.create_line(
+                x,
+                y0,
+                x,
+                y1,
+                fill=BORDER,
+            )
+            self._draw_text(
+                x,
+                y1 + 18,
+                self.compact_number(
+                    value
+                ),
+                fill=MUTED,
+                font=(
+                    "Segoe UI",
+                    8,
+                ),
+            )
+
+        colors = self._series_colors()
+        keys = [
+            "y1"
+        ]
+        if any(
+            row.get(
+                "y2"
+            ) is not None
+            for row in self.plot_rows
+        ):
+            keys.append(
+                "y2"
+            )
+
+        for series_index, key in enumerate(
+            keys
+        ):
+            for row in self.plot_rows:
+                value = row.get(
+                    key
+                )
+                if value is None:
+                    continue
+
+                px = x_for(
+                    row[
+                        "x_numeric"
+                    ]
+                )
+                py = y_for(
+                    float(value)
+                )
+                radius = 4
+                self.canvas.create_oval(
+                    px - radius,
+                    py - radius,
+                    px + radius,
+                    py + radius,
+                    fill=colors[
+                        series_index
+                    ],
+                    outline="",
+                )
+
+        self._draw_axis_titles(
+            x0,
+            y0,
+            x1,
+            y1,
+        )
+        self._draw_legend(
+            width
+        )
+
+    def _draw_histogram(
+        self,
+        width,
+        height,
+    ):
+        x0, y0, x1, y1 = (
+            self._plot_area(
+                width,
+                height,
+            )
+        )
+
+        values = [
+            float(
+                row[
+                    "x_numeric"
+                ]
+            )
+            for row in self.plot_rows
+        ]
+
+        minimum = min(
+            values
+        )
+        maximum = max(
+            values
+        )
+
+        if math.isclose(
+            minimum,
+            maximum,
+        ):
+            minimum -= 0.5
+            maximum += 0.5
+
+        bins = min(
+            20,
+            max(
+                5,
+                round(
+                    math.sqrt(
+                        len(values)
+                    )
+                ),
+            ),
+        )
+        width_value = (
+            maximum - minimum
+        ) / bins
+        counts = [
+            0
+            for _ in range(
+                bins
+            )
+        ]
+
+        for value in values:
+            index = int(
+                (value - minimum)
+                / width_value
+            )
+            index = min(
+                bins - 1,
+                max(
+                    0,
+                    index,
+                ),
+            )
+            counts[index] += 1
+
+        y_for, _, _ = (
+            self._draw_y_axis(
+                x0,
+                y0,
+                x1,
+                y1,
+                0,
+                max(counts),
+                force_zero=True,
+            )
+        )
+
+        slot = (
+            (x1 - x0)
+            / bins
+        )
+        zero_y = y_for(
+            0
+        )
+
+        for index, count in enumerate(
+            counts
+        ):
+            left = (
+                x0
+                + index * slot
+                + 1
+            )
+            right = (
+                x0
+                + (index + 1)
+                * slot
+                - 1
+            )
+            top = y_for(
+                count
+            )
+
+            self.canvas.create_rectangle(
+                left,
+                top,
+                right,
+                zero_y,
+                fill=PRIMARY,
+                outline="",
+            )
+
+        for tick in range(6):
+            fraction = tick / 5
+            value = (
+                minimum
+                + fraction
+                * (maximum - minimum)
+            )
+            x = (
+                x0
+                + fraction
+                * (x1 - x0)
+            )
+            self._draw_text(
+                x,
+                y1 + 18,
+                self.compact_number(
+                    value
+                ),
+                fill=MUTED,
+                font=(
+                    "Segoe UI",
+                    8,
+                ),
+            )
+
+        self._draw_text(
+            (x0 + x1) / 2,
+            y1 + 76,
+            self.x_label,
+            fill=MUTED,
+            font=(
+                "Bahnschrift",
+                9,
+                "bold",
+            ),
+        )
+        self._draw_text(
+            18,
+            (y0 + y1) / 2,
+            "Count",
+            fill=MUTED,
+            font=(
+                "Bahnschrift",
+                9,
+                "bold",
+            ),
+            angle=90,
+        )
 
 
 class EconomyViewer:
@@ -8273,6 +9829,27 @@ class EconomyViewer:
         except Exception:
             activity_group_basis = "Combined activity"
 
+        try:
+            plot_state = {
+                "source": self.plot_source_dropdown.get(),
+                "group": self.plot_group_dropdown.get(),
+                "x": self.plot_x_dropdown.get(),
+                "y": self.plot_y_dropdown.get(),
+                "y2": self.plot_y2_dropdown.get(),
+                "chart": self.plot_type_dropdown.get(),
+                "aggregation": self.plot_aggregation_dropdown.get(),
+                "sort": self.plot_sort_dropdown.get(),
+                "max_points": self.plot_max_points_var.get(),
+                "preset": self.plot_preset_dropdown.get(),
+                "rendered": getattr(
+                    self,
+                    "plot_has_rendered",
+                    False,
+                ),
+            }
+        except Exception:
+            plot_state = None
+
         had_simulation = (
             self.last_sim_settings is not None
             and not self.sim_dirty
@@ -8414,6 +9991,69 @@ class EconomyViewer:
                 self.refresh_activity_target_rows()
             except Exception:
                 pass
+
+            if plot_state is not None:
+                try:
+                    self.plot_source_dropdown.set(
+                        plot_state[
+                            "source"
+                        ]
+                    )
+                    self.plot_group_dropdown.set(
+                        plot_state[
+                            "group"
+                        ]
+                    )
+                    self.refresh_plot_fields()
+
+                    for dropdown, key in [
+                        (
+                            self.plot_x_dropdown,
+                            "x",
+                        ),
+                        (
+                            self.plot_y_dropdown,
+                            "y",
+                        ),
+                        (
+                            self.plot_y2_dropdown,
+                            "y2",
+                        ),
+                        (
+                            self.plot_type_dropdown,
+                            "chart",
+                        ),
+                        (
+                            self.plot_aggregation_dropdown,
+                            "aggregation",
+                        ),
+                        (
+                            self.plot_sort_dropdown,
+                            "sort",
+                        ),
+                        (
+                            self.plot_preset_dropdown,
+                            "preset",
+                        ),
+                    ]:
+                        dropdown.set(
+                            plot_state[
+                                key
+                            ]
+                        )
+
+                    self.plot_max_points_var.set(
+                        plot_state[
+                            "max_points"
+                        ]
+                    )
+
+                    if plot_state[
+                        "rendered"
+                    ]:
+                        self.render_plot()
+                except Exception:
+                    pass
 
             if had_simulation:
                 self.run_simulator()
@@ -8682,6 +10322,11 @@ class EconomyViewer:
             (
                 "transactions",
                 "Transactions",
+            ),
+
+            (
+                "plots",
+                "Plots",
             ),
 
             (
@@ -9352,6 +10997,10 @@ class EconomyViewer:
         )
 
         self.page_frames[
+            "plots"
+        ] = self.build_plots_page()
+
+        self.page_frames[
             "simulator"
         ] = self.build_simulator_page()
 
@@ -9669,7 +11318,7 @@ class EconomyViewer:
         self.make_page_header(
             page,
             "Activity Groups",
-            "Group users by how intensely they use the economy and compare what a typical member earns.",
+            "Group users by natural activity levels, then inspect the users and historical game averages inside each group.",
         )
 
         self.activity_group_help_card = self.make_help_card(
@@ -9677,7 +11326,7 @@ class EconomyViewer:
             (
                 "Users are grouped by natural activity levels instead of forcing the same number of people into every group. "
                 "Combined activity uses both estimated active hours per day and balance changes per day. You can also group only by active hours or only by transactions. "
-                "A server with many casual users and only a few heavy users will therefore have many more people in the casual groups than in the very active groups."
+                "The detailed section below lets you inspect historical game averages and the individual members inside any group."
             ),
             height=130,
         )
@@ -9701,6 +11350,11 @@ class EconomyViewer:
             text="Group users by",
             bg=INFO_BG,
             fg=MUTED,
+            font=(
+                "Bahnschrift",
+                9,
+                "bold",
+            ),
         ).pack(
             side=tk.LEFT,
             padx=(0, 8),
@@ -9731,7 +11385,7 @@ class EconomyViewer:
 
         panel = RoundedPanel(
             page,
-            height=650,
+            height=320,
             padding=18,
         )
         panel.pack(
@@ -9741,11 +11395,206 @@ class EconomyViewer:
 
         self.activity_group_table = DataTable(
             panel.inner,
-            height=14,
+            height=8,
+            double_click_callback=(
+                self.open_activity_group_from_row
+            ),
         )
         self.activity_group_table.pack(
-            fill=tk.BOTH,
-            expand=True,
+            fill=tk.X,
+            expand=False,
+        )
+
+        detail_controls = RoundedPanel(
+            page,
+            height=100,
+            padding=16,
+            fill=INFO_BG,
+            outline=BORDER,
+        )
+        detail_controls.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        detail_row = detail_controls.inner
+
+        tk.Label(
+            detail_row,
+            text="Detailed group",
+            bg=INFO_BG,
+            fg=MUTED,
+            font=(
+                "Bahnschrift",
+                9,
+                "bold",
+            ),
+        ).pack(
+            side=tk.LEFT,
+            padx=(0, 8),
+        )
+
+        self.activity_group_detail_dropdown = SingleSelectMenuButton(
+            detail_row,
+            options=ACTIVITY_GROUP_NAMES,
+            value=ACTIVITY_GROUP_NAMES[0],
+            width=190,
+            on_change=self.view_activity_group_details,
+        )
+        self.activity_group_detail_dropdown.pack(
+            side=tk.LEFT,
+            padx=(0, 12),
+        )
+
+        RoundedButton(
+            detail_row,
+            "View Group",
+            self.view_activity_group_details,
+            width=104,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        ).pack(
+            side=tk.LEFT,
+        )
+
+        tk.Label(
+            detail_row,
+            text="You can also double-click a group in the table above.",
+            bg=INFO_BG,
+            fg=MUTED,
+            font=(
+                "Segoe UI",
+                9,
+            ),
+        ).pack(
+            side=tk.LEFT,
+            padx=(14, 0),
+        )
+
+        self.activity_group_detail_card = ExplanationCard(
+            page,
+            title="Selected activity group",
+            text=(
+                "Select an activity group to see its historical game averages and members."
+            ),
+            min_height=130,
+        )
+        self.activity_group_detail_card.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        game_panel = RoundedPanel(
+            page,
+            height=360,
+            padding=18,
+        )
+        game_panel.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        tk.Label(
+            game_panel.inner,
+            text="Historical game averages",
+            bg=CARD,
+            fg=TEXT,
+            font=(
+                "Bahnschrift",
+                12,
+                "bold",
+            ),
+        ).pack(
+            anchor="w",
+            pady=(0, 10),
+        )
+
+        tk.Label(
+            game_panel.inner,
+            text=(
+                "These rows describe what this activity group actually did in the selected history. "
+                "They do not control the fixed-frequency Game Simulator."
+            ),
+            bg=CARD,
+            fg=MUTED,
+            font=(
+                "Segoe UI",
+                9,
+            ),
+            justify=tk.LEFT,
+            anchor="w",
+        ).pack(
+            fill=tk.X,
+            anchor="w",
+            pady=(0, 10),
+        )
+
+        self.activity_group_game_table = DataTable(
+            game_panel.inner,
+            height=len(
+                GAME_ORDER
+            ),
+        )
+        self.activity_group_game_table.pack(
+            fill=tk.X,
+            expand=False,
+        )
+
+        member_panel = RoundedPanel(
+            page,
+            height=560,
+            padding=18,
+        )
+        member_panel.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        tk.Label(
+            member_panel.inner,
+            text="Group members",
+            bg=CARD,
+            fg=TEXT,
+            font=(
+                "Bahnschrift",
+                12,
+                "bold",
+            ),
+        ).pack(
+            anchor="w",
+            pady=(0, 6),
+        )
+
+        tk.Label(
+            member_panel.inner,
+            text=(
+                "Double-click a user to open their full User Breakdown."
+            ),
+            bg=CARD,
+            fg=MUTED,
+            font=(
+                "Segoe UI",
+                9,
+            ),
+            justify=tk.LEFT,
+            anchor="w",
+        ).pack(
+            fill=tk.X,
+            anchor="w",
+            pady=(0, 10),
+        )
+
+        self.activity_group_member_table = DataTable(
+            member_panel.inner,
+            height=20,
+            double_click_callback=(
+                self.open_user_from_row
+            ),
+        )
+        self.activity_group_member_table.pack(
+            fill=tk.X,
+            expand=False,
         )
 
         return page
@@ -9775,6 +11624,16 @@ class EconomyViewer:
         if not rows:
             self.activity_group_help_card.set_text(
                 "There are no users in the current selection."
+            )
+            self.activity_group_detail_dropdown.set_options(
+                ACTIVITY_GROUP_NAMES,
+                selected=ACTIVITY_GROUP_NAMES[0],
+            )
+            self.activity_group_game_table.set_data(
+                []
+            )
+            self.activity_group_member_table.set_data(
+                []
             )
             return
 
@@ -9813,14 +11672,1764 @@ class EconomyViewer:
                 f"At the same historical pace they would {money_words(quietest['Avg 24h Net'], '24 hours')} and {money_words(quietest['Avg 30d Net'], '30 days')}.\n\n"
                 f"A typical {busiest['Group']} member is active for about {busiest['Avg Active Hrs / Day']:,.2f} hours per day and has about {busiest['Avg Transactions / Day']:,.1f} balance changes per day. "
                 f"At the same historical pace they would {money_words(busiest['Avg 24h Net'], '24 hours')} and {money_words(busiest['Avg 30d Net'], '30 days')}.\n\n"
-                "The Game Simulator does not infer game counts from this history. It only takes the group's active time, then assumes the number of plays of EACH game that you enter per five active minutes."
+                "Double-click any group, or use the Detailed group selector below, to inspect its game-by-game averages and individual members."
             )
         )
+
+        available_groups = [
+            row["Group"]
+            for row in nonempty
+        ]
+
+        previous = (
+            self.activity_group_detail_dropdown
+            .get()
+        )
+
+        selected = (
+            previous
+            if previous
+            in available_groups
+            else available_groups[0]
+        )
+
+        self.activity_group_detail_dropdown.set_options(
+            available_groups,
+            selected=selected,
+        )
+
+        self.view_activity_group_details()
 
         try:
             self.refresh_activity_target_rows()
         except Exception:
             pass
+
+    def open_activity_group_from_row(
+        self,
+        row,
+    ):
+        group_name = str(
+            row.get(
+                "Group",
+                "",
+            )
+        ).strip()
+
+        if not group_name:
+            return
+
+        self.activity_group_detail_dropdown.set(
+            group_name
+        )
+        self.view_activity_group_details()
+
+    def view_activity_group_details(
+        self,
+    ):
+        if not self.analyzer.transactions:
+            return
+
+        try:
+            basis = (
+                self.activity_group_basis_dropdown
+                .get()
+            )
+        except Exception:
+            basis = "Combined activity"
+
+        try:
+            group_name = (
+                self.activity_group_detail_dropdown
+                .get()
+            )
+        except Exception:
+            group_name = ACTIVITY_GROUP_NAMES[0]
+
+        details = (
+            self.analyzer
+            .get_activity_group_details(
+                group_name,
+                basis,
+            )
+        )
+
+        game_rows = details[
+            "game_rows"
+        ]
+        member_rows = details[
+            "member_rows"
+        ]
+
+        self.activity_group_game_table.set_data(
+            game_rows
+        )
+        self.activity_group_member_table.set_data(
+            member_rows
+        )
+
+        if not details[
+            "members"
+        ]:
+            self.activity_group_detail_card.set_text(
+                (
+                    f"{group_name} has no users in the current selection."
+                )
+            )
+            return
+
+        summary = details[
+            "summary"
+        ]
+
+        active_hours = float(
+            summary[
+                "Avg Active Hrs / Day"
+            ]
+        )
+        transactions = float(
+            summary[
+                "Avg Transactions / Day"
+            ]
+        )
+        active_days = float(
+            summary[
+                "Avg Active Days / 30d"
+            ]
+        )
+        net24 = float(
+            summary[
+                "Avg 24h Net"
+            ]
+        )
+        net30 = float(
+            summary[
+                "Avg 30d Net"
+            ]
+        )
+
+        played_rows = [
+            row
+            for row in game_rows
+            if row[
+                "Users Played"
+            ] > 0
+        ]
+
+        if played_rows:
+            most_played = max(
+                played_rows,
+                key=lambda row:
+                    row[
+                        "Avg Plays / Member / Day"
+                    ],
+            )
+            best_game = max(
+                played_rows,
+                key=lambda row:
+                    row[
+                        "Avg 24h Net / Member"
+                    ],
+            )
+            worst_game = min(
+                played_rows,
+                key=lambda row:
+                    row[
+                        "Avg 24h Net / Member"
+                    ],
+            )
+
+            game_text = (
+                f"The historically most-played game for this group is {most_played['Game']} at about {most_played['Avg Plays / Member / Day']:,.2f} plays per member per day. "
+                f"The most profitable game for the average group member is {best_game['Game']} at about {best_game['Avg 24h Net / Member']:+,.0f} per day, while {worst_game['Game']} is the weakest at about {worst_game['Avg 24h Net / Member']:+,.0f} per day."
+            )
+        else:
+            game_text = (
+                "There is no recorded game activity for this group in the selected history."
+            )
+
+        if net24 > 0:
+            overall_text = (
+                f"the average member finishes about {net24:,.0f} richer per day"
+            )
+        elif net24 < 0:
+            overall_text = (
+                f"the average member finishes about {abs(net24):,.0f} poorer per day"
+            )
+        else:
+            overall_text = (
+                "the average member finishes about even per day"
+            )
+
+        game24 = float(
+            details[
+                "avg_game_net_per_member_24h"
+            ]
+        )
+        game30 = float(
+            details[
+                "avg_game_net_per_member_30d"
+            ]
+        )
+        plays_day = float(
+            details[
+                "avg_game_plays_per_member_day"
+            ]
+        )
+
+        self.activity_group_detail_card.set_text(
+            (
+                f"{group_name} contains {details['members']:,} users. A typical member is active for about {active_hours:,.2f} hours per day, makes about {transactions:,.1f} balance changes per day, and is active on the equivalent of about {active_days:,.1f} days out of 30. "
+                f"Across the whole included economy, {overall_text}; at the same pace that is about {net30:+,.0f} over 30 days.\n\n"
+                f"Looking only at historical game activity, the average member played about {plays_day:,.2f} included games per day. Those games contributed about {game24:+,.0f} per member per day, or about {game30:+,.0f} over 30 days. "
+                f"{game_text}\n\n"
+                "The game table is descriptive history. 'Avg Plays / Member / Day' averages across everyone in the activity group, including people who did not play that game. "
+                "'Avg Plays / Player / Day' averages only across the members who actually played it. The fixed-frequency Game Simulator does not use these historical play counts or preferences."
+            )
+        )
+
+    def build_plots_page(self):
+        page = self.new_page()
+
+        self.make_page_header(
+            page,
+            "Plots",
+            "Build useful charts from any of the main analysis tables, including plotting numeric values against each other.",
+        )
+
+        self.plot_help_card = self.make_help_card(
+            page,
+            (
+                "Choose a data source, X value and Y value, then pick a chart type. Scatter plots are useful for relationships such as activity versus earnings. "
+                "Line plots are best for Hourly or Daily trends. Bar plots are useful for comparing categories such as games, income sources or activity groups. "
+                "Histograms show the distribution of one numeric value across users or transactions."
+            ),
+            height=120,
+        )
+
+        controls = RoundedPanel(
+            page,
+            height=190,
+            padding=16,
+            fill=INFO_BG,
+            outline=BORDER,
+        )
+        controls.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        row1 = tk.Frame(
+            controls.inner,
+            bg=INFO_BG,
+        )
+        row1.pack(
+            fill=tk.X,
+            pady=(0, 10),
+        )
+
+        tk.Label(
+            row1,
+            text="Quick plot",
+            bg=INFO_BG,
+            fg=MUTED,
+            font=(
+                "Bahnschrift",
+                9,
+                "bold",
+            ),
+        ).pack(
+            side=tk.LEFT,
+            padx=(0, 8),
+        )
+
+        self.plot_preset_dropdown = SingleSelectMenuButton(
+            row1,
+            options=[
+                "User activity vs 30d result",
+                "User transactions vs 30d result",
+                "Income source net",
+                "Hourly net trend",
+                "Daily net trend",
+                "Activity group 30d net",
+                "Activity group game profit",
+                "Simulator current vs proposed",
+            ],
+            value="User activity vs 30d result",
+            width=250,
+        )
+        self.plot_preset_dropdown.pack(
+            side=tk.LEFT,
+            padx=(0, 10),
+        )
+
+        RoundedButton(
+            row1,
+            "Apply Preset",
+            self.apply_plot_preset,
+            width=108,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        ).pack(
+            side=tk.LEFT,
+            padx=(0, 16),
+        )
+
+        tk.Label(
+            row1,
+            text="Source",
+            bg=INFO_BG,
+            fg=MUTED,
+            font=(
+                "Bahnschrift",
+                9,
+                "bold",
+            ),
+        ).pack(
+            side=tk.LEFT,
+            padx=(0, 8),
+        )
+
+        self.plot_source_dropdown = SingleSelectMenuButton(
+            row1,
+            options=[
+                "Users",
+                "Activity Groups",
+                "Activity Group Games",
+                "Income Sources",
+                "Hourly",
+                "Daily",
+                "User Hours",
+                "Transactions",
+                "Game Simulation",
+            ],
+            value="Users",
+            width=190,
+            on_change=self.refresh_plot_fields,
+        )
+        self.plot_source_dropdown.pack(
+            side=tk.LEFT,
+            padx=(0, 10),
+        )
+
+        tk.Label(
+            row1,
+            text="Activity group",
+            bg=INFO_BG,
+            fg=MUTED,
+            font=(
+                "Bahnschrift",
+                9,
+                "bold",
+            ),
+        ).pack(
+            side=tk.LEFT,
+            padx=(0, 8),
+        )
+
+        self.plot_group_dropdown = SingleSelectMenuButton(
+            row1,
+            options=ACTIVITY_GROUP_NAMES,
+            value=ACTIVITY_GROUP_NAMES[0],
+            width=150,
+            on_change=self.refresh_plot_fields,
+        )
+        self.plot_group_dropdown.pack(
+            side=tk.LEFT,
+        )
+
+        row2 = tk.Frame(
+            controls.inner,
+            bg=INFO_BG,
+        )
+        row2.pack(
+            fill=tk.X,
+            pady=(0, 10),
+        )
+
+        def control_label(
+            parent,
+            text_value,
+        ):
+            tk.Label(
+                parent,
+                text=text_value,
+                bg=INFO_BG,
+                fg=MUTED,
+                font=(
+                    "Bahnschrift",
+                    8,
+                    "bold",
+                ),
+            ).pack(
+                side=tk.LEFT,
+                padx=(0, 6),
+            )
+
+        control_label(
+            row2,
+            "X",
+        )
+        self.plot_x_dropdown = SingleSelectMenuButton(
+            row2,
+            options=[
+                "None"
+            ],
+            value="None",
+            width=190,
+        )
+        self.plot_x_dropdown.pack(
+            side=tk.LEFT,
+            padx=(0, 10),
+        )
+
+        control_label(
+            row2,
+            "Y",
+        )
+        self.plot_y_dropdown = SingleSelectMenuButton(
+            row2,
+            options=[
+                "None"
+            ],
+            value="None",
+            width=190,
+        )
+        self.plot_y_dropdown.pack(
+            side=tk.LEFT,
+            padx=(0, 10),
+        )
+
+        control_label(
+            row2,
+            "Y2",
+        )
+        self.plot_y2_dropdown = SingleSelectMenuButton(
+            row2,
+            options=[
+                "None"
+            ],
+            value="None",
+            width=190,
+        )
+        self.plot_y2_dropdown.pack(
+            side=tk.LEFT,
+            padx=(0, 10),
+        )
+
+        control_label(
+            row2,
+            "Chart",
+        )
+        self.plot_type_dropdown = SingleSelectMenuButton(
+            row2,
+            options=[
+                "Auto",
+                "Bar",
+                "Line",
+                "Scatter",
+                "Histogram",
+            ],
+            value="Auto",
+            width=130,
+        )
+        self.plot_type_dropdown.pack(
+            side=tk.LEFT,
+            padx=(0, 10),
+        )
+
+        row3 = tk.Frame(
+            controls.inner,
+            bg=INFO_BG,
+        )
+        row3.pack(
+            fill=tk.X,
+        )
+
+        control_label(
+            row3,
+            "Aggregate",
+        )
+        self.plot_aggregation_dropdown = SingleSelectMenuButton(
+            row3,
+            options=[
+                "None",
+                "Sum Y by X",
+                "Average Y by X",
+            ],
+            value="None",
+            width=170,
+        )
+        self.plot_aggregation_dropdown.pack(
+            side=tk.LEFT,
+            padx=(0, 10),
+        )
+
+        control_label(
+            row3,
+            "Sort",
+        )
+        self.plot_sort_dropdown = SingleSelectMenuButton(
+            row3,
+            options=[
+                "Original order",
+                "X ascending",
+                "X descending",
+                "Y ascending",
+                "Y descending",
+            ],
+            value="Original order",
+            width=160,
+        )
+        self.plot_sort_dropdown.pack(
+            side=tk.LEFT,
+            padx=(0, 10),
+        )
+
+        control_label(
+            row3,
+            "Max points",
+        )
+        self.plot_max_points_var = tk.StringVar(
+            value="30"
+        )
+        self.plot_max_points_entry = RoundedEntry(
+            row3,
+            textvariable=self.plot_max_points_var,
+            width=90,
+        )
+        self.plot_max_points_entry.pack(
+            side=tk.LEFT,
+            padx=(0, 6),
+        )
+
+        tk.Label(
+            row3,
+            text="0 = all",
+            bg=INFO_BG,
+            fg=MUTED,
+            font=(
+                "Segoe UI",
+                8,
+            ),
+        ).pack(
+            side=tk.LEFT,
+            padx=(0, 14),
+        )
+
+        RoundedButton(
+            row3,
+            "Plot",
+            self.render_plot,
+            width=92,
+        ).pack(
+            side=tk.LEFT,
+            padx=(0, 8),
+        )
+
+        self.plot_copy_button = RoundedButton(
+            row3,
+            "Copy Plot Data",
+            self.copy_plot_data_for_discord,
+            width=126,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        )
+        self.plot_copy_button.pack(
+            side=tk.LEFT,
+        )
+
+        chart_panel = RoundedPanel(
+            page,
+            height=590,
+            padding=18,
+        )
+        chart_panel.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        self.plot_canvas = PlotCanvas(
+            chart_panel.inner,
+            height=520,
+        )
+        self.plot_canvas.pack(
+            fill=tk.BOTH,
+            expand=True,
+        )
+
+        self.plot_summary_card = ExplanationCard(
+            page,
+            title="Plot interpretation",
+            text=(
+                "Create a plot and this section will summarize the most useful pattern in it."
+            ),
+            min_height=110,
+        )
+        self.plot_summary_card.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        self.current_plot_rows = []
+        self.current_plot_title = ""
+        self.plot_has_rendered = False
+
+        self.refresh_plot_fields()
+
+        return page
+
+    def get_plot_source_rows(
+        self,
+        source=None,
+    ):
+        if source is None:
+            source = self.plot_source_dropdown.get()
+
+        if source == "Users":
+            return list(
+                self.analyzer.user_stats
+            )
+
+        if source == "Activity Groups":
+            try:
+                basis = self.activity_group_basis_dropdown.get()
+            except Exception:
+                basis = "Combined activity"
+
+            rows, _ = self.analyzer.get_activity_groups(
+                basis
+            )
+            return list(
+                rows
+            )
+
+        if source == "Activity Group Games":
+            try:
+                basis = self.activity_group_basis_dropdown.get()
+            except Exception:
+                basis = "Combined activity"
+
+            try:
+                group_name = self.plot_group_dropdown.get()
+            except Exception:
+                group_name = ACTIVITY_GROUP_NAMES[0]
+
+            details = self.analyzer.get_activity_group_details(
+                group_name,
+                basis,
+            )
+            return list(
+                details[
+                    "game_rows"
+                ]
+            )
+
+        if source == "Income Sources":
+            return list(
+                self.analyzer.reason_stats
+            )
+
+        if source == "Hourly":
+            return list(
+                self.analyzer.hourly_stats
+            )
+
+        if source == "Daily":
+            return list(
+                self.analyzer.daily_stats
+            )
+
+        if source == "User Hours":
+            return list(
+                self.analyzer.user_hour_stats
+            )
+
+        if source == "Transactions":
+            return [
+                {
+                    "Timestamp": to_local_string(
+                        tx[
+                            "timestamp"
+                        ]
+                    ),
+                    "User ID": tx[
+                        "user_id"
+                    ],
+                    "Cash": tx[
+                        "cash"
+                    ],
+                    "Bank": tx[
+                        "bank"
+                    ],
+                    "Total": tx[
+                        "total"
+                    ],
+                    "Reason": tx[
+                        "reason"
+                    ],
+                    "Original Reason": tx[
+                        "original_reason"
+                    ],
+                }
+                for tx in self.analyzer.transactions
+            ]
+
+        if source == "Game Simulation":
+            table = getattr(
+                self,
+                "sim_game_table",
+                None,
+            )
+            if table is None:
+                return []
+            return list(
+                table.data
+            )
+
+        return []
+
+    def plot_column_is_numeric(
+        self,
+        rows,
+        column,
+    ):
+        values = [
+            row.get(
+                column
+            )
+            for row in rows
+            if row.get(
+                column
+            ) not in (
+                None,
+                "",
+            )
+        ]
+
+        if not values:
+            return False
+
+        for value in values:
+            if isinstance(
+                value,
+                bool,
+            ):
+                return False
+
+            if isinstance(
+                value,
+                (
+                    int,
+                    float,
+                ),
+            ):
+                continue
+
+            try:
+                float(
+                    str(value)
+                    .replace(
+                        ",",
+                        "",
+                    )
+                )
+            except Exception:
+                return False
+
+        return True
+
+    def safe_plot_number(
+        self,
+        value,
+    ):
+        if isinstance(
+            value,
+            bool,
+        ):
+            raise ValueError(
+                "Boolean values cannot be plotted as numbers."
+            )
+
+        if isinstance(
+            value,
+            (
+                int,
+                float,
+            ),
+        ):
+            number = float(
+                value
+            )
+        else:
+            number = float(
+                str(value)
+                .replace(
+                    ",",
+                    "",
+                )
+                .strip()
+            )
+
+        if not math.isfinite(
+            number
+        ):
+            raise ValueError(
+                "Plot values must be finite numbers."
+            )
+
+        return number
+
+    def refresh_plot_fields(
+        self,
+    ):
+        if not hasattr(
+            self,
+            "plot_source_dropdown",
+        ):
+            return
+
+        rows = self.get_plot_source_rows()
+
+        previous_x = self.plot_x_dropdown.get()
+        previous_y = self.plot_y_dropdown.get()
+        previous_y2 = self.plot_y2_dropdown.get()
+
+        if not rows:
+            self.plot_x_dropdown.set_options(
+                [
+                    "None"
+                ],
+                selected="None",
+            )
+            self.plot_y_dropdown.set_options(
+                [
+                    "None"
+                ],
+                selected="None",
+            )
+            self.plot_y2_dropdown.set_options(
+                [
+                    "None"
+                ],
+                selected="None",
+            )
+            self.plot_canvas.set_message(
+                "This source does not have data yet. If you selected Game Simulation, run the simulator first."
+            )
+            return
+
+        columns = list(
+            rows[0].keys()
+        )
+        numeric_columns = [
+            column
+            for column in columns
+            if self.plot_column_is_numeric(
+                rows,
+                column,
+            )
+        ]
+
+        self.plot_x_dropdown.set_options(
+            columns,
+            selected=(
+                previous_x
+                if previous_x in columns
+                else columns[0]
+            ),
+        )
+
+        y_options = (
+            numeric_columns
+            or [
+                "None"
+            ]
+        )
+        self.plot_y_dropdown.set_options(
+            y_options,
+            selected=(
+                previous_y
+                if previous_y in y_options
+                else y_options[0]
+            ),
+        )
+
+        y2_options = [
+            "None",
+            *numeric_columns,
+        ]
+        self.plot_y2_dropdown.set_options(
+            y2_options,
+            selected=(
+                previous_y2
+                if previous_y2
+                in y2_options
+                else "None"
+            ),
+        )
+
+    def apply_plot_preset(self):
+        preset = self.plot_preset_dropdown.get()
+
+        presets = {
+            "User activity vs 30d result": {
+                "source": "Users",
+                "x": "Est. Active Hrs",
+                "y": "30d Net",
+                "y2": "None",
+                "chart": "Scatter",
+                "aggregation": "None",
+                "sort": "Original order",
+                "max_points": "0",
+            },
+            "User transactions vs 30d result": {
+                "source": "Users",
+                "x": "Transactions",
+                "y": "30d Net",
+                "y2": "None",
+                "chart": "Scatter",
+                "aggregation": "None",
+                "sort": "Original order",
+                "max_points": "0",
+            },
+            "Income source net": {
+                "source": "Income Sources",
+                "x": "Reason",
+                "y": "Net Profit",
+                "y2": "None",
+                "chart": "Bar",
+                "aggregation": "None",
+                "sort": "Y descending",
+                "max_points": "0",
+            },
+            "Hourly net trend": {
+                "source": "Hourly",
+                "x": "Hour",
+                "y": "Net Profit",
+                "y2": "None",
+                "chart": "Line",
+                "aggregation": "None",
+                "sort": "Original order",
+                "max_points": "0",
+            },
+            "Daily net trend": {
+                "source": "Daily",
+                "x": "Date",
+                "y": "Net Profit",
+                "y2": "None",
+                "chart": "Line",
+                "aggregation": "None",
+                "sort": "Original order",
+                "max_points": "0",
+            },
+            "Activity group 30d net": {
+                "source": "Activity Groups",
+                "x": "Group",
+                "y": "Avg 30d Net",
+                "y2": "None",
+                "chart": "Bar",
+                "aggregation": "None",
+                "sort": "Original order",
+                "max_points": "0",
+            },
+            "Activity group game profit": {
+                "source": "Activity Group Games",
+                "x": "Game",
+                "y": "Avg 30d Net / Member",
+                "y2": "None",
+                "chart": "Bar",
+                "aggregation": "None",
+                "sort": "Y descending",
+                "max_points": "0",
+            },
+            "Simulator current vs proposed": {
+                "source": "Game Simulation",
+                "x": "Game",
+                "y": "24h Current Net",
+                "y2": "24h Proposed Net",
+                "chart": "Bar",
+                "aggregation": "None",
+                "sort": "Original order",
+                "max_points": "0",
+            },
+        }
+
+        config = presets.get(
+            preset
+        )
+        if config is None:
+            return
+
+        self.plot_source_dropdown.set(
+            config[
+                "source"
+            ]
+        )
+        self.refresh_plot_fields()
+
+        for dropdown, key in [
+            (
+                self.plot_x_dropdown,
+                "x",
+            ),
+            (
+                self.plot_y_dropdown,
+                "y",
+            ),
+            (
+                self.plot_y2_dropdown,
+                "y2",
+            ),
+            (
+                self.plot_type_dropdown,
+                "chart",
+            ),
+            (
+                self.plot_aggregation_dropdown,
+                "aggregation",
+            ),
+            (
+                self.plot_sort_dropdown,
+                "sort",
+            ),
+        ]:
+            dropdown.set(
+                config[key]
+            )
+
+        self.plot_max_points_var.set(
+            config[
+                "max_points"
+            ]
+        )
+        self.render_plot()
+
+    def infer_plot_type(
+        self,
+        source,
+        x_key,
+        rows,
+    ):
+        if source in {
+            "Hourly",
+            "Daily",
+        }:
+            return "Line"
+
+        if self.plot_column_is_numeric(
+            rows,
+            x_key,
+        ):
+            return "Scatter"
+
+        return "Bar"
+
+    def prepare_plot_data(
+        self,
+        rows,
+        chart_type,
+        x_key,
+        y_key,
+        y2_key,
+        aggregation,
+        sort_mode,
+        max_points,
+    ):
+        if chart_type == "Histogram":
+            prepared = []
+            for row in rows:
+                try:
+                    x_numeric = self.safe_plot_number(
+                        row.get(
+                            x_key
+                        )
+                    )
+                except Exception:
+                    continue
+
+                prepared.append(
+                    {
+                        "x": row.get(
+                            x_key
+                        ),
+                        "x_numeric": x_numeric,
+                        "y1": 1.0,
+                        "y2": None,
+                    }
+                )
+
+            if sort_mode == "X ascending":
+                prepared.sort(
+                    key=lambda row:
+                        row[
+                            "x_numeric"
+                        ]
+                )
+            elif sort_mode == "X descending":
+                prepared.sort(
+                    key=lambda row:
+                        row[
+                            "x_numeric"
+                        ],
+                    reverse=True,
+                )
+
+            if max_points > 0:
+                prepared = prepared[
+                    :max_points
+                ]
+
+            return prepared
+
+        raw = []
+
+        for row in rows:
+            x_value = row.get(
+                x_key
+            )
+
+            if x_value in (
+                None,
+                "",
+            ):
+                continue
+
+            try:
+                y1 = self.safe_plot_number(
+                    row.get(
+                        y_key
+                    )
+                )
+            except Exception:
+                continue
+
+            y2 = None
+            if (
+                y2_key
+                and y2_key != "None"
+            ):
+                try:
+                    y2 = self.safe_plot_number(
+                        row.get(
+                            y2_key
+                        )
+                    )
+                except Exception:
+                    y2 = None
+
+            x_numeric = None
+            try:
+                x_numeric = self.safe_plot_number(
+                    x_value
+                )
+            except Exception:
+                pass
+
+            raw.append(
+                {
+                    "x": x_value,
+                    "x_numeric": x_numeric,
+                    "y1": y1,
+                    "y2": y2,
+                }
+            )
+
+        if aggregation != "None":
+            grouped = defaultdict(
+                list
+            )
+            for row in raw:
+                grouped[
+                    str(row[
+                        "x"
+                    ])
+                ].append(
+                    row
+                )
+
+            prepared = []
+            use_average = (
+                aggregation
+                == "Average Y by X"
+            )
+
+            for x_text, grouped_rows in grouped.items():
+                y1_values = [
+                    row[
+                        "y1"
+                    ]
+                    for row in grouped_rows
+                ]
+                y2_values = [
+                    row[
+                        "y2"
+                    ]
+                    for row in grouped_rows
+                    if row[
+                        "y2"
+                    ] is not None
+                ]
+
+                if use_average:
+                    y1_value = statistics.mean(
+                        y1_values
+                    )
+                    y2_value = (
+                        statistics.mean(
+                            y2_values
+                        )
+                        if y2_values
+                        else None
+                    )
+                else:
+                    y1_value = sum(
+                        y1_values
+                    )
+                    y2_value = (
+                        sum(
+                            y2_values
+                        )
+                        if y2_values
+                        else None
+                    )
+
+                prepared.append(
+                    {
+                        "x": x_text,
+                        "x_numeric": None,
+                        "y1": y1_value,
+                        "y2": y2_value,
+                    }
+                )
+        else:
+            prepared = raw
+
+        if chart_type == "Scatter":
+            prepared = [
+                row
+                for row in prepared
+                if row[
+                    "x_numeric"
+                ] is not None
+            ]
+
+        if sort_mode == "X ascending":
+            prepared.sort(
+                key=lambda row: (
+                    row[
+                        "x_numeric"
+                    ]
+                    if row[
+                        "x_numeric"
+                    ] is not None
+                    else str(
+                        row[
+                            "x"
+                        ]
+                    ).lower()
+                )
+            )
+        elif sort_mode == "X descending":
+            prepared.sort(
+                key=lambda row: (
+                    row[
+                        "x_numeric"
+                    ]
+                    if row[
+                        "x_numeric"
+                    ] is not None
+                    else str(
+                        row[
+                            "x"
+                        ]
+                    ).lower()
+                ),
+                reverse=True,
+            )
+        elif sort_mode == "Y ascending":
+            prepared.sort(
+                key=lambda row:
+                    row[
+                        "y1"
+                    ]
+            )
+        elif sort_mode == "Y descending":
+            prepared.sort(
+                key=lambda row:
+                    row[
+                        "y1"
+                    ],
+                reverse=True,
+            )
+
+        if max_points > 0:
+            prepared = prepared[
+                :max_points
+            ]
+
+        return prepared
+
+    def calculate_plot_correlation(
+        self,
+        rows,
+    ):
+        pairs = [
+            (
+                row.get(
+                    "x_numeric"
+                ),
+                row.get(
+                    "y1"
+                ),
+            )
+            for row in rows
+            if row.get(
+                "x_numeric"
+            ) is not None
+        ]
+
+        if len(
+            pairs
+        ) < 3:
+            return None
+
+        xs = [
+            float(pair[0])
+            for pair in pairs
+        ]
+        ys = [
+            float(pair[1])
+            for pair in pairs
+        ]
+
+        x_mean = statistics.mean(
+            xs
+        )
+        y_mean = statistics.mean(
+            ys
+        )
+
+        numerator = sum(
+            (
+                x - x_mean
+            )
+            * (
+                y - y_mean
+            )
+            for x, y in zip(
+                xs,
+                ys,
+            )
+        )
+        x_sq = sum(
+            (
+                x - x_mean
+            ) ** 2
+            for x in xs
+        )
+        y_sq = sum(
+            (
+                y - y_mean
+            ) ** 2
+            for y in ys
+        )
+
+        denominator = math.sqrt(
+            x_sq * y_sq
+        )
+
+        if denominator <= 0:
+            return None
+
+        return (
+            numerator
+            / denominator
+        )
+
+    def update_plot_summary(
+        self,
+        rows,
+        chart_type,
+        source,
+        x_key,
+        y_key,
+        y2_key,
+    ):
+        if not rows:
+            self.plot_summary_card.set_text(
+                "There is no valid data to summarize for this plot."
+            )
+            return
+
+        if chart_type == "Histogram":
+            values = [
+                row[
+                    "x_numeric"
+                ]
+                for row in rows
+            ]
+            self.plot_summary_card.set_text(
+                (
+                    f"This histogram contains {len(values):,} values from {source}. "
+                    f"{x_key} ranges from {min(values):,.2f} to {max(values):,.2f}, with a median of {statistics.median(values):,.2f}. "
+                    "Use this to see whether most observations are concentrated in one range or spread widely."
+                )
+            )
+            return
+
+        y_values = [
+            row[
+                "y1"
+            ]
+            for row in rows
+        ]
+        best = max(
+            rows,
+            key=lambda row:
+                row[
+                    "y1"
+                ],
+        )
+        worst = min(
+            rows,
+            key=lambda row:
+                row[
+                    "y1"
+                ],
+        )
+
+        if chart_type == "Scatter":
+            correlation = self.calculate_plot_correlation(
+                rows
+            )
+
+            if correlation is None:
+                correlation_text = (
+                    "There is not enough variation to calculate a useful correlation."
+                )
+            else:
+                absolute = abs(
+                    correlation
+                )
+                if absolute >= 0.7:
+                    strength = "strong"
+                elif absolute >= 0.4:
+                    strength = "moderate"
+                elif absolute >= 0.2:
+                    strength = "weak"
+                else:
+                    strength = "very weak"
+
+                direction = (
+                    "positive"
+                    if correlation > 0
+                    else "negative"
+                )
+                correlation_text = (
+                    f"The Pearson correlation is about {correlation:+.3f}, which is a {strength} {direction} relationship in the selected data. "
+                    "Correlation describes association only and does not prove that one value causes the other."
+                )
+
+            self.plot_summary_card.set_text(
+                (
+                    f"This scatter plot compares {x_key} against {y_key} across {len(rows):,} observations from {source}. "
+                    f"{correlation_text} The highest plotted {y_key} is {best['y1']:+,.2f}, while the lowest is {worst['y1']:+,.2f}."
+                )
+            )
+            return
+
+        extra = ""
+        if (
+            y2_key
+            and y2_key != "None"
+        ):
+            y2_values = [
+                row[
+                    "y2"
+                ]
+                for row in rows
+                if row.get(
+                    "y2"
+                ) is not None
+            ]
+            if y2_values:
+                extra = (
+                    f" The average {y_key} is {statistics.mean(y_values):+,.2f}, compared with an average {y2_key} of {statistics.mean(y2_values):+,.2f}."
+                )
+
+        self.plot_summary_card.set_text(
+            (
+                f"This {chart_type.lower()} plot shows {len(rows):,} observations from {source}. "
+                f"The highest {y_key} is {best['y1']:+,.2f} at {best['x']}, while the lowest is {worst['y1']:+,.2f} at {worst['x']}."
+                f"{extra}"
+            )
+        )
+
+    def render_plot(self):
+        try:
+            source = self.plot_source_dropdown.get()
+            rows = self.get_plot_source_rows(
+                source
+            )
+
+            if not rows:
+                self.plot_canvas.set_message(
+                    "There is no data for this source yet."
+                )
+                self.plot_summary_card.set_text(
+                    "There is no data to plot for the selected source."
+                )
+                return
+
+            x_key = self.plot_x_dropdown.get()
+            y_key = self.plot_y_dropdown.get()
+            y2_key = self.plot_y2_dropdown.get()
+            chart_type = self.plot_type_dropdown.get()
+            aggregation = self.plot_aggregation_dropdown.get()
+            sort_mode = self.plot_sort_dropdown.get()
+
+            if x_key == "None":
+                raise ValueError(
+                    "Choose an X value."
+                )
+
+            if chart_type != "Histogram" and y_key == "None":
+                raise ValueError(
+                    "Choose a numeric Y value."
+                )
+
+            if chart_type == "Auto":
+                chart_type = self.infer_plot_type(
+                    source,
+                    x_key,
+                    rows,
+                )
+
+            try:
+                max_points = int(
+                    self.plot_max_points_var.get()
+                    .strip()
+                    or "0"
+                )
+            except ValueError:
+                raise ValueError(
+                    "Max points must be a whole number. Use 0 for all points."
+                )
+
+            if max_points < 0:
+                raise ValueError(
+                    "Max points cannot be negative."
+                )
+
+            if (
+                chart_type == "Scatter"
+                and not self.plot_column_is_numeric(
+                    rows,
+                    x_key,
+                )
+            ):
+                raise ValueError(
+                    "Scatter plots require a numeric X value."
+                )
+
+            if (
+                chart_type == "Histogram"
+                and not self.plot_column_is_numeric(
+                    rows,
+                    x_key,
+                )
+            ):
+                raise ValueError(
+                    "Histograms require a numeric X value."
+                )
+
+            prepared = self.prepare_plot_data(
+                rows,
+                chart_type,
+                x_key,
+                y_key,
+                y2_key,
+                aggregation,
+                sort_mode,
+                max_points,
+            )
+
+            if not prepared:
+                raise ValueError(
+                    "No rows contain valid values for the selected plot."
+                )
+
+            title = (
+                f"{source}: {x_key} vs {y_key}"
+                if chart_type != "Histogram"
+                else f"{source}: distribution of {x_key}"
+            )
+
+            y_labels = []
+            if chart_type != "Histogram":
+                y_labels.append(
+                    y_key
+                )
+                if (
+                    y2_key
+                    and y2_key != "None"
+                    and any(
+                        row.get(
+                            "y2"
+                        ) is not None
+                        for row in prepared
+                    )
+                ):
+                    y_labels.append(
+                        y2_key
+                    )
+
+            self.plot_canvas.set_plot(
+                prepared,
+                chart_type,
+                x_key,
+                y_labels,
+                title,
+            )
+
+            self.current_plot_rows = prepared
+            self.current_plot_title = title
+            self.plot_has_rendered = True
+
+            self.update_plot_summary(
+                prepared,
+                chart_type,
+                source,
+                x_key,
+                y_key,
+                y2_key,
+            )
+
+        except Exception as error:
+            messagebox.showerror(
+                "Plot Error",
+                str(error),
+            )
+
+    def copy_plot_data_for_discord(self):
+        rows = getattr(
+            self,
+            "current_plot_rows",
+            [],
+        )
+
+        if not rows:
+            return
+
+        title = getattr(
+            self,
+            "current_plot_title",
+            "Plot Data",
+        )
+
+        lines = [
+            f"**{title}**",
+            "```text",
+        ]
+
+        has_y2 = any(
+            row.get(
+                "y2"
+            ) is not None
+            for row in rows
+        )
+
+        if has_y2:
+            lines.append(
+                f"{'X':<24} {'Y':>12} {'Y2':>12}"
+            )
+            lines.append(
+                f"{'-' * 24} {'-' * 12} {'-' * 12}"
+            )
+        else:
+            lines.append(
+                f"{'X':<28} {'Y':>14}"
+            )
+            lines.append(
+                f"{'-' * 28} {'-' * 14}"
+            )
+
+        used = 0
+        for row in rows:
+            x_text = discord_clean_text(
+                row.get(
+                    "x",
+                    "",
+                )
+            )
+            if len(x_text) > 28:
+                x_text = (
+                    x_text[:27]
+                    + "…"
+                )
+
+            if has_y2:
+                line = (
+                    f"{x_text:<24} "
+                    f"{discord_compact_number(row['y1']):>12} "
+                    f"{discord_compact_number(row.get('y2', '')):>12}"
+                )
+            else:
+                line = (
+                    f"{x_text:<28} "
+                    f"{discord_compact_number(row['y1']):>14}"
+                )
+
+            candidate = (
+                "\n".join(
+                    [
+                        *lines,
+                        line,
+                        "```",
+                    ]
+                )
+            )
+
+            if len(candidate) > DISCORD_SAFE_MESSAGE_LENGTH:
+                break
+
+            lines.append(
+                line
+            )
+            used += 1
+
+        if used < len(rows):
+            lines.append(
+                f"... {len(rows) - used} more points"
+            )
+
+        lines.append(
+            "```"
+        )
+
+        clipboard_text = "\n".join(
+            lines
+        )
+
+        self.root.clipboard_clear()
+        self.root.clipboard_append(
+            clipboard_text
+        )
+        self.root.update()
+
+        self.plot_copy_button.set_text(
+            "Copied"
+        )
+        self.root.after(
+            1200,
+            lambda:
+                self.plot_copy_button.set_text(
+                    "Copy Plot Data"
+                ),
+        )
 
     def build_simulator_page(self):
         page = self.new_page()
@@ -11416,6 +15025,12 @@ class EconomyViewer:
 
         self.current_page = key
 
+        if key == "plots":
+            try:
+                self.refresh_plot_fields()
+            except Exception:
+                pass
+
         for (
             nav_key,
             button,
@@ -12013,6 +15628,21 @@ class EconomyViewer:
 
         self.refresh_user_dropdowns()
         self.update_page_explanations()
+
+        if hasattr(
+            self,
+            "plot_source_dropdown",
+        ):
+            try:
+                self.refresh_plot_fields()
+                if getattr(
+                    self,
+                    "plot_has_rendered",
+                    False,
+                ):
+                    self.render_plot()
+            except Exception:
+                pass
 
         if (
             self.user_dropdown.get()
