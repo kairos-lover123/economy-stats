@@ -2125,62 +2125,32 @@ class EconomyAnalyzer:
                     {
                         "Group": group_name,
                         "Members": 0,
-                        "Avg Active Hrs": 0,
-                        "Avg Transactions": 0,
-                        "Avg Active Days": 0,
+                        "Avg Active Hrs / Day": 0,
+                        "Avg Transactions / Day": 0,
+                        "Avg Active Days / 30d": 0,
                         "Avg 24h Net": 0,
                         "Avg 30d Net": 0,
-                        "Avg 24h Game Net": 0,
-                        "Avg 30d Game Net": 0,
-                        "Avg Games / 24h": 0,
                     }
                 )
                 continue
-
-            group_game_net = 0.0
-            total_rounds = 0.0
-
-            for user_id in group_users:
-                user_games = (
-                    self.user_game_transactions
-                    .get(
-                        str(user_id),
-                        {},
-                    )
-                )
-
-                for game in GAME_ORDER:
-                    game_txs = user_games.get(
-                        game,
-                        [],
-                    )
-                    if not game_txs:
-                        continue
-
-                    group_game_net += sum(
-                        tx["total"]
-                        for tx in game_txs
-                    )
-                    total_rounds += self.estimate_game_rounds(
-                        game,
-                        game_txs,
-                    )
 
             member_count = len(group_records)
             average_net = statistics.mean(
                 row["net"]
                 for row in group_records
             )
-            average_hours = statistics.mean(
-                row["active_hours"]
+            average_hours_per_day = statistics.mean(
+                row["hours_per_day"]
                 for row in group_records
             )
-            average_transactions = statistics.mean(
-                row["transactions"]
+            average_transactions_per_day = statistics.mean(
+                row["transactions_per_day"]
                 for row in group_records
             )
-            average_active_days = statistics.mean(
+            average_active_days_per_30d = statistics.mean(
                 row["active_days"]
+                / analysis_days
+                * 30.0
                 for row in group_records
             )
 
@@ -2188,26 +2158,14 @@ class EconomyAnalyzer:
                 {
                     "Group": group_name,
                     "Members": member_count,
-                    "Avg Active Hrs": average_hours,
-                    "Avg Transactions": average_transactions,
-                    "Avg Active Days": average_active_days,
+                    "Avg Active Hrs / Day": average_hours_per_day,
+                    "Avg Transactions / Day": average_transactions_per_day,
+                    "Avg Active Days / 30d": min(
+                        30.0,
+                        average_active_days_per_30d,
+                    ),
                     "Avg 24h Net": average_net * factor24,
                     "Avg 30d Net": average_net * factor30,
-                    "Avg 24h Game Net": (
-                        group_game_net
-                        * factor24
-                        / member_count
-                    ),
-                    "Avg 30d Game Net": (
-                        group_game_net
-                        * factor30
-                        / member_count
-                    ),
-                    "Avg Games / 24h": (
-                        total_rounds
-                        * factor24
-                        / member_count
-                    ),
                 }
             )
 
@@ -2217,67 +2175,80 @@ class EconomyAnalyzer:
         self,
         basis="Combined activity",
     ):
-        _, members = self.get_activity_groups(basis)
+        _, members = self.get_activity_groups(
+            basis
+        )
 
-        user_to_group = {}
-        for group_name, user_ids in members.items():
-            for user_id in user_ids:
-                user_to_group[str(user_id)] = group_name
+        analysis_days = max(
+            self.get_analysis_days(),
+            1.0 / 24.0,
+        )
 
-        group_game_txs = {
-            group_name: {
-                game: []
-                for game in GAME_ORDER
-            }
-            for group_name in ACTIVITY_GROUP_NAMES
+        user_stats_by_id = {
+            str(row["User ID"]): row
+            for row in self.user_stats
         }
+
+        group_avg_active_hours_per_day = {}
+        group_avg_active_days_per_day = {}
+
+        for group_name in ACTIVITY_GROUP_NAMES:
+            rows = [
+                user_stats_by_id[user_id]
+                for user_id
+                in members.get(
+                    group_name,
+                    set(),
+                )
+                if user_id in user_stats_by_id
+            ]
+
+            if not rows:
+                group_avg_active_hours_per_day[
+                    group_name
+                ] = 0.0
+                group_avg_active_days_per_day[
+                    group_name
+                ] = 0.0
+                continue
+
+            group_avg_active_hours_per_day[
+                group_name
+            ] = statistics.mean(
+                float(
+                    row["Est. Active Hrs"]
+                )
+                / analysis_days
+                for row in rows
+            )
+
+            group_avg_active_days_per_day[
+                group_name
+            ] = statistics.mean(
+                float(
+                    row["Active Days"]
+                )
+                / analysis_days
+                for row in rows
+            )
+
         global_game_txs = {
-            game: []
-            for game in GAME_ORDER
-        }
-
-        for game in GAME_ORDER:
-            global_game_txs[game] = (
+            game:
                 self.game_transactions.get(
                     game,
                     [],
                 )
-            )
-
-        for user_id, group_name in user_to_group.items():
-            game_map = (
-                self.user_game_transactions
-                .get(
-                    str(user_id),
-                    {},
-                )
-            )
-
-            for game in GAME_ORDER:
-                txs = game_map.get(
-                    game,
-                    [],
-                )
-                if txs:
-                    group_game_txs[
-                        group_name
-                    ][game].extend(txs)
-
-        group_rounds = {}
-        for group_name in ACTIVITY_GROUP_NAMES:
-            group_rounds[group_name] = sum(
-                self.estimate_game_rounds(
-                    game,
-                    group_game_txs[group_name][game],
-                )
-                for game in GAME_ORDER
-            )
+            for game in GAME_ORDER
+        }
 
         return {
             "members": members,
-            "group_game_txs": group_game_txs,
-            "global_game_txs": global_game_txs,
-            "group_rounds": group_rounds,
+            "global_game_txs":
+                global_game_txs,
+            "group_avg_active_hours_per_day":
+                group_avg_active_hours_per_day,
+            "group_avg_active_days_per_day":
+                group_avg_active_days_per_day,
         }
 
     def make_current_baseline_settings(
@@ -2322,46 +2293,28 @@ class EconomyAnalyzer:
         context,
         use_actual_game_mix=False,
     ):
-        """Estimate monthly game profit using the exact simulator aggregate.
+        """Estimate monthly game profit from a fixed play rate.
 
-        Every activity group uses the same server-wide average result per game
-        played. Groups differ only in how many games their members play. The
-        server-wide average is taken directly from simulation_scope(), so the
-        target panel and the 24-hour game table cannot use different models.
+        Historical game counts and historical game mix are deliberately ignored.
+        Every activity group is assumed to play EVERY modeled game the number of
+        times entered in the plays-per-five-active-minutes field. Groups differ
+        only by their estimated active time.
         """
         predictions = {}
-        factor24 = self.get_24h_factor()
 
-        _, summary = self.simulation_scope(
-            settings
-        )
-
-        proposed_server_games_24h = float(
-            summary.get(
-                "24h_proposed_games",
-                0.0,
-            )
-        )
-        proposed_server_net_24h = float(
-            summary.get(
-                "24h_proposed_net",
-                0.0,
+        unit_metrics = (
+            self.build_game_unit_metrics(
+                settings
             )
         )
 
-        average_net_per_round = (
-            proposed_server_net_24h
-            / proposed_server_games_24h
-            if proposed_server_games_24h > 0
-            else 0.0
-        )
-
-        activity_scale = (
-            settings["proposed_games_per_5m"]
-            / max(
-                0.000001,
-                settings["current_games_per_5m"],
-            )
+        proposed_rate = max(
+            0.0,
+            float(
+                settings[
+                    "proposed_games_per_5m"
+                ]
+            ),
         )
 
         for group_name in ACTIVITY_GROUP_NAMES:
@@ -2376,23 +2329,60 @@ class EconomyAnalyzer:
                 predictions[group_name] = 0.0
                 continue
 
-            observed_group_games_24h = (
-                context["group_rounds"].get(
+            active_hours_per_day = float(
+                context[
+                    "group_avg_active_hours_per_day"
+                ].get(
                     group_name,
                     0.0,
                 )
-                * factor24
+            )
+            active_days_per_day = float(
+                context[
+                    "group_avg_active_days_per_day"
+                ].get(
+                    group_name,
+                    0.0,
+                )
             )
 
-            proposed_games_per_member_24h = (
-                observed_group_games_24h
-                * activity_scale
-                / member_count
+            plays_per_game_per_day = (
+                active_hours_per_day
+                * 12.0
+                * proposed_rate
             )
+
+            daily_net = 0.0
+
+            for game in GAME_ORDER:
+                metrics = unit_metrics.get(
+                    game,
+                    {},
+                )
+
+                daily_net += (
+                    plays_per_game_per_day
+                    * float(
+                        metrics.get(
+                            "proposed_net_per_play",
+                            0.0,
+                        )
+                    )
+                )
+
+                if game == "animal race":
+                    daily_net += (
+                        active_days_per_day
+                        * float(
+                            metrics.get(
+                                "fixed_purchase_net_per_active_day",
+                                0.0,
+                            )
+                        )
+                    )
 
             predictions[group_name] = (
-                average_net_per_round
-                * proposed_games_per_member_24h
+                daily_net
                 * 30.0
             )
 
@@ -2589,56 +2579,46 @@ class EconomyAnalyzer:
         balance_cache = {}
 
         def evaluate_game_balance(settings):
-            """Softly keep the normal configurable games useful together.
+            """Keep normal configurable games useful on a per-play basis.
 
-            Russian Roulette is intentionally ignored. The monthly target is
-            still the primary goal, but this penalty stops the optimizer from
-            reaching it by turning one category into an extreme money printer.
+            Historical game popularity is ignored. Russian Roulette is
+            intentionally excluded from this balancing goal.
             """
+            metrics_by_game = (
+                self.build_game_unit_metrics(
+                    settings
+                )
+            )
+
             game_rows = []
 
             for game in BALANCED_OPTIMIZER_GAMES:
-                txs = context[
-                    "global_game_txs"
-                ].get(
+                metrics = metrics_by_game.get(
                     game,
-                    [],
+                    {},
                 )
 
-                if not txs:
+                if not metrics.get(
+                    "has_model_data",
+                    False,
+                ):
                     continue
 
-                result = self.simulate_game(
-                    game,
-                    txs,
-                    settings,
-                )
-
-                rounds = float(
-                    result.get(
-                        "proposed_rounds",
-                        0.0,
-                    )
-                )
-
-                if rounds <= 0:
-                    continue
-
-                proposed_net = float(
-                    result.get(
-                        "proposed_net",
-                        0.0,
-                    )
-                )
                 current_net = float(
-                    result.get(
-                        "current_model_net",
+                    metrics.get(
+                        "current_net_per_play",
+                        0.0,
+                    )
+                )
+                proposed_net = float(
+                    metrics.get(
+                        "proposed_net_per_play",
                         0.0,
                     )
                 )
                 proposed_lost = float(
-                    result.get(
-                        "proposed_lost",
+                    metrics.get(
+                        "proposed_lost_per_play",
                         0.0,
                     )
                 )
@@ -2647,12 +2627,10 @@ class EconomyAnalyzer:
                     1.0,
                     abs(proposed_lost),
                 )
-
                 return_rate = (
                     proposed_net
                     / denominator
                 )
-
                 scored_rate = max(
                     -1.0,
                     min(
@@ -2666,13 +2644,13 @@ class EconomyAnalyzer:
                         "game": game,
                         "proposed_net": proposed_net,
                         "current_net": current_net,
-                        "uplift": (
+                        "uplift":
                             proposed_net
-                            - current_net
-                        ),
-                        "return_rate": return_rate,
-                        "scored_rate": scored_rate,
-                        "rounds": rounds,
+                            - current_net,
+                        "return_rate":
+                            return_rate,
+                        "scored_rate":
+                            scored_rate,
                     }
                 )
 
@@ -2685,16 +2663,21 @@ class EconomyAnalyzer:
                     "rows": [],
                 }
 
-            game_count = len(game_rows)
+            game_count = len(
+                game_rows
+            )
 
-            # Prefer every normal configurable game to be beneficial.
             beneficial_penalty = 0.0
             profitable_games = 0
 
             for row in game_rows:
-                rate = row["scored_rate"]
+                rate = row[
+                    "scored_rate"
+                ]
 
-                if row["proposed_net"] > 0:
+                if row[
+                    "proposed_net"
+                ] > 0:
                     profitable_games += 1
                 else:
                     beneficial_penalty += (
@@ -2713,8 +2696,6 @@ class EconomyAnalyzer:
                 game_count,
             )
 
-            # Keep expected player return rates reasonably close so one game
-            # does not become obviously superior to all the others.
             rates = [
                 row["scored_rate"]
                 for row in game_rows
@@ -2722,6 +2703,7 @@ class EconomyAnalyzer:
             median_rate = statistics.median(
                 rates
             )
+
             rate_spread_penalty = (
                 sum(
                     (
@@ -2736,7 +2718,6 @@ class EconomyAnalyzer:
                 )
             )
 
-            # Spread positive improvement across multiple game categories.
             positive_uplifts = [
                 max(
                     0.0,
@@ -2762,6 +2743,7 @@ class EconomyAnalyzer:
                 largest_positive_share = max(
                     shares
                 )
+
                 equal_share = (
                     1.0
                     / len(shares)
@@ -2778,8 +2760,10 @@ class EconomyAnalyzer:
                     * 1.8
                 )
 
-                # A single game should not provide nearly all of the benefit.
-                if largest_positive_share > 0.45:
+                if (
+                    largest_positive_share
+                    > 0.45
+                ):
                     concentration_penalty += (
                         (
                             largest_positive_share
@@ -2788,8 +2772,6 @@ class EconomyAnalyzer:
                         * 8.0
                     )
 
-                # If the optimizer is increasing profit overall, try to make
-                # most active configurable games matter at least a little.
                 for share in shares:
                     if share < 0.04:
                         concentration_penalty += (
@@ -2800,20 +2782,23 @@ class EconomyAnalyzer:
                             * 3.0
                         )
 
-            # Extra protection against one setting becoming absurd relative to
-            # the current game's result.
             explosion_penalty = 0.0
 
             for row in game_rows:
                 current_scale = max(
-                    100.0,
+                    1.0,
                     abs(
-                        row["current_net"]
+                        row[
+                            "current_net"
+                        ]
                     ),
                 )
+
                 relative_uplift = (
                     abs(
-                        row["uplift"]
+                        row[
+                            "uplift"
+                        ]
                     )
                     / current_scale
                 )
@@ -2843,10 +2828,14 @@ class EconomyAnalyzer:
 
             return {
                 "penalty": penalty,
-                "profitable_games": profitable_games,
-                "game_count": game_count,
-                "largest_positive_share": largest_positive_share,
-                "rows": game_rows,
+                "profitable_games":
+                    profitable_games,
+                "game_count":
+                    game_count,
+                "largest_positive_share":
+                    largest_positive_share,
+                "rows":
+                    game_rows,
             }
 
         def optimizer_key(settings):
@@ -4296,121 +4285,640 @@ class EconomyAnalyzer:
                 activity_scale,
         }
 
-    def simulation_scope(
+    def get_activity_profile_per_day(
         self,
-        settings,
         user_id=None,
     ):
-        factor24 = self.get_24h_factor()
-        game_rows = []
-        totals = defaultdict(float)
+        """Return active hours/day and active days/day.
+
+        Activity history is used only to estimate how much time somebody is
+        active. It is NOT used to infer game counts or preferred games.
+        """
+        analysis_days = max(
+            self.get_analysis_days(),
+            1.0 / 24.0,
+        )
+
+        if user_id is None:
+            total_active_hours = sum(
+                float(
+                    row["Est. Active Hrs"]
+                )
+                for row in self.user_stats
+            )
+            total_active_days = sum(
+                float(
+                    row["Active Days"]
+                )
+                for row in self.user_stats
+            )
+
+            return {
+                "active_hours_per_day":
+                    total_active_hours
+                    / analysis_days,
+                "active_days_per_day":
+                    total_active_days
+                    / analysis_days,
+            }
+
+        txs = self.get_user_transactions(
+            user_id
+        )
+        activity = self.calculate_activity(
+            txs
+        )
+
+        return {
+            "active_hours_per_day":
+                float(
+                    activity[
+                        "active_hours"
+                    ]
+                )
+                / analysis_days,
+            "active_days_per_day":
+                float(
+                    activity[
+                        "active_days"
+                    ]
+                )
+                / analysis_days,
+        }
+
+    def build_game_unit_metrics(
+        self,
+        settings,
+    ):
+        """Estimate economics for one play of every modeled game.
+
+        Historical transactions are used to estimate bet behavior and game
+        economics, but their historical frequency is ignored.
+        """
+        model_settings = copy.deepcopy(
+            settings
+        )
+
+        # Neutralize the old activity multiplier inside simulate_game. The
+        # fixed play count is applied later from the user's input.
+        model_settings[
+            "proposed_games_per_5m"
+        ] = model_settings[
+            "current_games_per_5m"
+        ]
+
+        total_active_days = sum(
+            float(
+                row["Active Days"]
+            )
+            for row in self.user_stats
+        )
+
+        metrics_by_game = {}
 
         for game in GAME_ORDER:
             txs = self.get_game_transactions(
-                game,
-                user_id=user_id,
+                game
             )
 
             result = self.simulate_game(
                 game,
                 txs,
-                settings,
+                model_settings,
             )
 
-            totals["observed_net"] += result["observed_net"]
-            totals["current_model_net"] += result["current_model_net"]
-            totals["current_model_earned"] += result["current_model_earned"]
-            totals["current_model_lost"] += result["current_model_lost"]
-            totals["proposed_net"] += result["proposed_net"]
-            totals["proposed_earned"] += result["proposed_earned"]
-            totals["proposed_lost"] += result["proposed_lost"]
-            totals["observed_rounds"] += result["observed_rounds"]
-            totals["proposed_rounds"] += result["proposed_rounds"]
+            current_rounds = float(
+                result.get(
+                    "observed_rounds",
+                    0.0,
+                )
+            )
+            proposed_rounds = float(
+                result.get(
+                    "proposed_rounds",
+                    current_rounds,
+                )
+            )
+            has_model_data = (
+                current_rounds > 0
+            )
 
-            row = {
-                "Game": GAME_DISPLAY[game],
-                "24h Current Games": (
-                    result["observed_rounds"]
-                    * factor24
-                ),
-                "24h Proposed Games": (
-                    result["proposed_rounds"]
-                    * factor24
-                ),
-                "Current Avg Bet": result["current_avg_bet"],
-                "Proposed Avg Bet": result["proposed_avg_bet"],
-                "24h Current Net": (
-                    result["current_model_net"]
-                    * factor24
-                ),
-                "24h Proposed Net": (
-                    result["proposed_net"]
-                    * factor24
-                ),
-                "24h Change": (
-                    (
-                        result["proposed_net"]
-                        - result["current_model_net"]
+            if game == "animal race":
+                current_net_source = float(
+                    result.get(
+                        "race_net",
+                        0.0,
                     )
-                    * factor24
-                ),
-            }
+                )
+                current_earned_source = float(
+                    result.get(
+                        "race_earned",
+                        0.0,
+                    )
+                )
+                current_lost_source = float(
+                    result.get(
+                        "race_lost",
+                        0.0,
+                    )
+                )
 
-            if "proposed_probability" in result:
-                row["Proposed Win %"] = (
-                    result["proposed_probability"]
-                    * 100
+                proposed_net_source = (
+                    current_net_source
+                )
+                proposed_earned_source = (
+                    current_earned_source
+                )
+                proposed_lost_source = (
+                    current_lost_source
                 )
             else:
-                row["Proposed Win %"] = ""
+                current_net_source = float(
+                    result.get(
+                        "current_model_net",
+                        0.0,
+                    )
+                )
+                current_earned_source = float(
+                    result.get(
+                        "current_model_earned",
+                        0.0,
+                    )
+                )
+                current_lost_source = float(
+                    result.get(
+                        "current_model_lost",
+                        0.0,
+                    )
+                )
+                proposed_net_source = float(
+                    result.get(
+                        "proposed_net",
+                        0.0,
+                    )
+                )
+                proposed_earned_source = float(
+                    result.get(
+                        "proposed_earned",
+                        0.0,
+                    )
+                )
+                proposed_lost_source = float(
+                    result.get(
+                        "proposed_lost",
+                        0.0,
+                    )
+                )
 
-            game_rows.append(row)
+            current_denominator = max(
+                1.0,
+                current_rounds,
+            )
+            proposed_denominator = max(
+                1.0,
+                proposed_rounds,
+            )
+
+            metrics = {
+                "has_model_data":
+                    has_model_data,
+                "current_net_per_play":
+                    (
+                        current_net_source
+                        / current_denominator
+                        if has_model_data
+                        else 0.0
+                    ),
+                "current_earned_per_play":
+                    (
+                        current_earned_source
+                        / current_denominator
+                        if has_model_data
+                        else 0.0
+                    ),
+                "current_lost_per_play":
+                    (
+                        current_lost_source
+                        / current_denominator
+                        if has_model_data
+                        else 0.0
+                    ),
+                "proposed_net_per_play":
+                    (
+                        proposed_net_source
+                        / proposed_denominator
+                        if has_model_data
+                        else 0.0
+                    ),
+                "proposed_earned_per_play":
+                    (
+                        proposed_earned_source
+                        / proposed_denominator
+                        if has_model_data
+                        else 0.0
+                    ),
+                "proposed_lost_per_play":
+                    (
+                        proposed_lost_source
+                        / proposed_denominator
+                        if has_model_data
+                        else 0.0
+                    ),
+                "current_avg_bet":
+                    float(
+                        result.get(
+                            "current_avg_bet",
+                            0.0,
+                        )
+                    ),
+                "proposed_avg_bet":
+                    float(
+                        result.get(
+                            "proposed_avg_bet",
+                            0.0,
+                        )
+                    ),
+                "current_probability":
+                    result.get(
+                        "current_probability"
+                    ),
+                "proposed_probability":
+                    result.get(
+                        "proposed_probability"
+                    ),
+                "fixed_purchase_net_per_active_day":
+                    0.0,
+                "fixed_purchase_earned_per_active_day":
+                    0.0,
+                "fixed_purchase_lost_per_active_day":
+                    0.0,
+            }
+
+            if (
+                game == "animal race"
+                and total_active_days > 0
+            ):
+                metrics[
+                    "fixed_purchase_net_per_active_day"
+                ] = (
+                    float(
+                        result.get(
+                            "fixed_purchase_net",
+                            0.0,
+                        )
+                    )
+                    / total_active_days
+                )
+                metrics[
+                    "fixed_purchase_earned_per_active_day"
+                ] = (
+                    float(
+                        result.get(
+                            "fixed_purchase_earned",
+                            0.0,
+                        )
+                    )
+                    / total_active_days
+                )
+                metrics[
+                    "fixed_purchase_lost_per_active_day"
+                ] = (
+                    float(
+                        result.get(
+                            "fixed_purchase_lost",
+                            0.0,
+                        )
+                    )
+                    / total_active_days
+                )
+
+            metrics_by_game[
+                game
+            ] = metrics
+
+        return metrics_by_game
+
+    def simulation_scope(
+        self,
+        settings,
+        user_id=None,
+        unit_metrics=None,
+    ):
+        if unit_metrics is None:
+            unit_metrics = (
+                self.build_game_unit_metrics(
+                    settings
+                )
+            )
+
+        profile = (
+            self.get_activity_profile_per_day(
+                user_id=user_id
+            )
+        )
+
+        active_hours_per_day = max(
+            0.0,
+            float(
+                profile[
+                    "active_hours_per_day"
+                ]
+            ),
+        )
+        active_days_per_day = max(
+            0.0,
+            float(
+                profile[
+                    "active_days_per_day"
+                ]
+            ),
+        )
+
+        current_rate = max(
+            0.0,
+            float(
+                settings[
+                    "current_games_per_5m"
+                ]
+            ),
+        )
+        proposed_rate = max(
+            0.0,
+            float(
+                settings[
+                    "proposed_games_per_5m"
+                ]
+            ),
+        )
+
+        current_plays_each_game = (
+            active_hours_per_day
+            * 12.0
+            * current_rate
+        )
+        proposed_plays_each_game = (
+            active_hours_per_day
+            * 12.0
+            * proposed_rate
+        )
+
+        game_rows = []
+        totals = defaultdict(float)
+
+        for game in GAME_ORDER:
+            metrics = unit_metrics.get(
+                game,
+                {},
+            )
+
+            current_net = (
+                current_plays_each_game
+                * float(
+                    metrics.get(
+                        "current_net_per_play",
+                        0.0,
+                    )
+                )
+            )
+            current_earned = (
+                current_plays_each_game
+                * float(
+                    metrics.get(
+                        "current_earned_per_play",
+                        0.0,
+                    )
+                )
+            )
+            current_lost = (
+                current_plays_each_game
+                * float(
+                    metrics.get(
+                        "current_lost_per_play",
+                        0.0,
+                    )
+                )
+            )
+
+            proposed_net = (
+                proposed_plays_each_game
+                * float(
+                    metrics.get(
+                        "proposed_net_per_play",
+                        0.0,
+                    )
+                )
+            )
+            proposed_earned = (
+                proposed_plays_each_game
+                * float(
+                    metrics.get(
+                        "proposed_earned_per_play",
+                        0.0,
+                    )
+                )
+            )
+            proposed_lost = (
+                proposed_plays_each_game
+                * float(
+                    metrics.get(
+                        "proposed_lost_per_play",
+                        0.0,
+                    )
+                )
+            )
+
+            # Animal/provision purchases are a fixed historical rate per active
+            # day. They do not multiply just because race count increases.
+            if game == "animal race":
+                current_net += (
+                    active_days_per_day
+                    * float(
+                        metrics.get(
+                            "fixed_purchase_net_per_active_day",
+                            0.0,
+                        )
+                    )
+                )
+                current_earned += (
+                    active_days_per_day
+                    * float(
+                        metrics.get(
+                            "fixed_purchase_earned_per_active_day",
+                            0.0,
+                        )
+                    )
+                )
+                current_lost += (
+                    active_days_per_day
+                    * float(
+                        metrics.get(
+                            "fixed_purchase_lost_per_active_day",
+                            0.0,
+                        )
+                    )
+                )
+
+                proposed_net += (
+                    active_days_per_day
+                    * float(
+                        metrics.get(
+                            "fixed_purchase_net_per_active_day",
+                            0.0,
+                        )
+                    )
+                )
+                proposed_earned += (
+                    active_days_per_day
+                    * float(
+                        metrics.get(
+                            "fixed_purchase_earned_per_active_day",
+                            0.0,
+                        )
+                    )
+                )
+                proposed_lost += (
+                    active_days_per_day
+                    * float(
+                        metrics.get(
+                            "fixed_purchase_lost_per_active_day",
+                            0.0,
+                        )
+                    )
+                )
+
+            totals[
+                "current_model_net"
+            ] += current_net
+            totals[
+                "current_model_earned"
+            ] += current_earned
+            totals[
+                "current_model_lost"
+            ] += current_lost
+            totals[
+                "proposed_net"
+            ] += proposed_net
+            totals[
+                "proposed_earned"
+            ] += proposed_earned
+            totals[
+                "proposed_lost"
+            ] += proposed_lost
+            totals[
+                "current_rounds"
+            ] += current_plays_each_game
+            totals[
+                "proposed_rounds"
+            ] += proposed_plays_each_game
+
+            row = {
+                "Game":
+                    GAME_DISPLAY[game],
+                "24h Current Games":
+                    current_plays_each_game,
+                "24h Proposed Games":
+                    proposed_plays_each_game,
+                "Current Avg Bet":
+                    float(
+                        metrics.get(
+                            "current_avg_bet",
+                            0.0,
+                        )
+                    ),
+                "Proposed Avg Bet":
+                    float(
+                        metrics.get(
+                            "proposed_avg_bet",
+                            0.0,
+                        )
+                    ),
+                "24h Current Net":
+                    current_net,
+                "24h Proposed Net":
+                    proposed_net,
+                "24h Change":
+                    proposed_net
+                    - current_net,
+            }
+
+            proposed_probability = (
+                metrics.get(
+                    "proposed_probability"
+                )
+            )
+
+            if proposed_probability is not None:
+                row[
+                    "Proposed Win %"
+                ] = (
+                    float(
+                        proposed_probability
+                    )
+                    * 100.0
+                )
+            else:
+                row[
+                    "Proposed Win %"
+                ] = ""
+
+            game_rows.append(
+                row
+            )
 
         summary = {
-            "24h_observed_net": (
-                totals["observed_net"]
-                * factor24
-            ),
-            "24h_current_model_net": (
-                totals["current_model_net"]
-                * factor24
-            ),
-            "24h_current_model_earned": (
-                totals["current_model_earned"]
-                * factor24
-            ),
-            "24h_current_model_lost": (
-                totals["current_model_lost"]
-                * factor24
-            ),
-            "24h_proposed_net": (
-                totals["proposed_net"]
-                * factor24
-            ),
-            "24h_proposed_earned": (
-                totals["proposed_earned"]
-                * factor24
-            ),
-            "24h_proposed_lost": (
-                totals["proposed_lost"]
-                * factor24
-            ),
-            "24h_change": (
-                (
-                    totals["proposed_net"]
-                    - totals["current_model_net"]
-                )
-                * factor24
-            ),
-            "24h_current_games": (
-                totals["observed_rounds"]
-                * factor24
-            ),
-            "24h_proposed_games": (
-                totals["proposed_rounds"]
-                * factor24
-            ),
-            "normalization_factor": factor24,
+            "24h_observed_net":
+                totals[
+                    "current_model_net"
+                ],
+            "24h_current_model_net":
+                totals[
+                    "current_model_net"
+                ],
+            "24h_current_model_earned":
+                totals[
+                    "current_model_earned"
+                ],
+            "24h_current_model_lost":
+                totals[
+                    "current_model_lost"
+                ],
+            "24h_proposed_net":
+                totals[
+                    "proposed_net"
+                ],
+            "24h_proposed_earned":
+                totals[
+                    "proposed_earned"
+                ],
+            "24h_proposed_lost":
+                totals[
+                    "proposed_lost"
+                ],
+            "24h_change":
+                totals[
+                    "proposed_net"
+                ]
+                - totals[
+                    "current_model_net"
+                ],
+            "24h_current_games":
+                totals[
+                    "current_rounds"
+                ],
+            "24h_proposed_games":
+                totals[
+                    "proposed_rounds"
+                ],
+            "normalization_factor":
+                1.0,
+            "active_hours_per_day":
+                active_hours_per_day,
+            "active_days_per_day":
+                active_days_per_day,
+            "current_plays_each_game_per_5m":
+                current_rate,
+            "proposed_plays_each_game_per_5m":
+                proposed_rate,
         }
 
         return (
@@ -4422,8 +4930,15 @@ class EconomyAnalyzer:
         self,
         settings,
     ):
+        unit_metrics = (
+            self.build_game_unit_metrics(
+                settings
+            )
+        )
+
         game_rows, summary = self.simulation_scope(
-            settings
+            settings,
+            unit_metrics=unit_metrics,
         )
 
         users = sorted({
@@ -4437,33 +4952,41 @@ class EconomyAnalyzer:
             _, user_summary = self.simulation_scope(
                 settings,
                 user_id=user_id,
+                unit_metrics=unit_metrics,
             )
 
             user_rows.append(
                 {
-                    "User ID": user_id,
-                    "24h Current Net": user_summary[
-                        "24h_current_model_net"
-                    ],
-                    "24h Proposed Net": user_summary[
-                        "24h_proposed_net"
-                    ],
-                    "24h Change": user_summary[
-                        "24h_change"
-                    ],
-                    "24h Current Games": user_summary[
-                        "24h_current_games"
-                    ],
-                    "24h Proposed Games": user_summary[
-                        "24h_proposed_games"
-                    ],
+                    "User ID":
+                        user_id,
+                    "24h Current Net":
+                        user_summary[
+                            "24h_current_model_net"
+                        ],
+                    "24h Proposed Net":
+                        user_summary[
+                            "24h_proposed_net"
+                        ],
+                    "24h Change":
+                        user_summary[
+                            "24h_change"
+                        ],
+                    "24h Current Games":
+                        user_summary[
+                            "24h_current_games"
+                        ],
+                    "24h Proposed Games":
+                        user_summary[
+                            "24h_proposed_games"
+                        ],
                 }
             )
 
         user_rows.sort(
-            key=lambda row: row[
-                "24h Proposed Net"
-            ],
+            key=lambda row:
+                row[
+                    "24h Proposed Net"
+                ],
             reverse=True,
         )
 
@@ -4478,13 +5001,17 @@ class EconomyAnalyzer:
         user_id,
         settings,
     ):
-        return (
-            self.simulation_scope(
-                settings,
-                user_id=user_id,
+        unit_metrics = (
+            self.build_game_unit_metrics(
+                settings
             )
         )
 
+        return self.simulation_scope(
+            settings,
+            user_id=user_id,
+            unit_metrics=unit_metrics,
+        )
 
 class RoundedButton(
     tk.Canvas
@@ -8525,15 +9052,22 @@ class EconomyViewer:
             return
 
         try:
-            basis = self.activity_group_basis_dropdown.get()
+            basis = (
+                self.activity_group_basis_dropdown
+                .get()
+            )
         except Exception:
             basis = "Combined activity"
 
-        rows, members = self.analyzer.get_activity_groups(
-            basis
+        rows, members = (
+            self.analyzer.get_activity_groups(
+                basis
+            )
         )
 
-        self.activity_group_table.set_data(rows)
+        self.activity_group_table.set_data(
+            rows
+        )
 
         if not rows:
             self.activity_group_help_card.set_text(
@@ -8555,22 +9089,28 @@ class EconomyViewer:
 
         def money_words(value, period):
             if value > 0:
-                return f"gain about {value:,.0f} over {period}"
+                return (
+                    f"gain about {value:,.0f} "
+                    f"over {period}"
+                )
             if value < 0:
-                return f"lose about {abs(value):,.0f} over {period}"
-            return f"finish about even over {period}"
+                return (
+                    f"lose about {abs(value):,.0f} "
+                    f"over {period}"
+                )
+            return (
+                f"finish about even over {period}"
+            )
 
         self.activity_group_help_card.set_text(
             (
-                f"The current grouping uses {basis.lower()}. The program looks for natural clusters in how intensely people actually use the economy instead of putting exactly 20% of users into each label. "
-                "That means the group sizes are expected to be uneven. 'Very Casual' is the lowest natural activity level and 'Very Active' is the highest. The boundaries adapt when the selected dates or filters change.\n\n"
-                f"A typical {quietest['Group']} member has about {quietest['Avg Active Hrs']:,.2f} estimated active hours and {quietest['Avg Transactions']:,.1f} balance changes during the selected window. "
-                f"At the same overall pace they would {money_words(quietest['Avg 24h Net'], '24 hours')} and {money_words(quietest['Avg 30d Net'], '30 days')}. "
-                f"Looking only at the games that the simulator can change, their 30-day game result is {quietest['Avg 30d Game Net']:+,.0f}. Their most-played game is {quietest['Most Played Game']}.\n\n"
-                f"A typical {busiest['Group']} member has about {busiest['Avg Active Hrs']:,.2f} estimated active hours and {busiest['Avg Transactions']:,.1f} balance changes during the selected window. "
-                f"At the same overall pace they would {money_words(busiest['Avg 24h Net'], '24 hours')} and {money_words(busiest['Avg 30d Net'], '30 days')}. "
-                f"Their 30-day game result is {busiest['Avg 30d Game Net']:+,.0f}, and their most-played game is {busiest['Most Played Game']}.\n\n"
-                "The overall 24-hour and 30-day columns include every included economy reason. The game-only columns include only Blackjack, Cock Fight, Roulette, Russian Roulette, Slot Machine, Higher or Lower and Animal Race, because those are the parts the Game Simulator can evaluate."
+                f"The current grouping uses {basis.lower()}. Users are clustered by natural gaps in activity instead of being forced into equal-sized groups. "
+                "Some groups can therefore contain many more people than others, and a group can be empty if the data does not contain a distinct activity level for it.\n\n"
+                f"A typical {quietest['Group']} member is active for about {quietest['Avg Active Hrs / Day']:,.2f} hours per day and has about {quietest['Avg Transactions / Day']:,.1f} balance changes per day. "
+                f"At the same historical pace they would {money_words(quietest['Avg 24h Net'], '24 hours')} and {money_words(quietest['Avg 30d Net'], '30 days')}.\n\n"
+                f"A typical {busiest['Group']} member is active for about {busiest['Avg Active Hrs / Day']:,.2f} hours per day and has about {busiest['Avg Transactions / Day']:,.1f} balance changes per day. "
+                f"At the same historical pace they would {money_words(busiest['Avg 24h Net'], '24 hours')} and {money_words(busiest['Avg 30d Net'], '30 days')}.\n\n"
+                "The Game Simulator does not infer game counts from this history. It only takes the group's active time, then assumes the number of plays of EACH game that you enter per five active minutes."
             )
         )
 
@@ -8586,14 +9126,14 @@ class EconomyViewer:
             page,
             "Game Simulator",
             (
-                "Change game settings and see what they would mean for players during a typical day"
+                "Assume a fixed number of plays of every game per 5 active minutes and test how settings change earnings"
             ),
         )
 
         self.sim_window_card = self.make_help_card(
             page,
             (
-                "Run the simulation and this box will explain the actual results in plain language. "
+                "Run the simulation and this box will explain the results in plain language. Historical game counts are not used to decide how much somebody plays. "
                 "Animal Race is included automatically, including race bets, winnings, animal purchases and provision purchases. "
                 "Its bet amount is kept from the history instead of being shown as a normal configurable bet limit. "
                 "Animal and provision purchases are kept at the rate actually seen in the history when you change race activity, "
@@ -8623,7 +9163,7 @@ class EconomyViewer:
 
         tk.Label(
             global_inner,
-            text="Global game activity",
+            text="Assumed game frequency",
             bg=CARD,
             fg=TEXT,
             font=(
@@ -8646,7 +9186,7 @@ class EconomyViewer:
 
         tk.Label(
             global_row,
-            text="Current games / 5 min",
+            text="Current plays of EACH game / 5 active min",
             bg=CARD,
             fg=MUTED,
         ).pack(
@@ -8672,7 +9212,7 @@ class EconomyViewer:
 
         tk.Label(
             global_row,
-            text="Proposed games / 5 min",
+            text="Proposed plays of EACH game / 5 active min",
             bg=CARD,
             fg=MUTED,
         ).pack(
@@ -8702,7 +9242,7 @@ class EconomyViewer:
 
         tk.Checkbutton(
             global_row,
-            text="Lock activity",
+            text="Lock play rate",
             variable=self.sim_lock_vars[
                 "proposed_games_per_5m"
             ],
@@ -9454,7 +9994,7 @@ class EconomyViewer:
             text=(
                 "Choose one or more activity groups, enter how much you want an average member to gain or lose from games over 30 days, then let the program search for nearby settings. "
                 "You can select a group by clicking its checkbox or group name. Typing a target automatically selects that group. "
-                "All activity groups use the exact same server-wide average result per game played that is calculated by the 24-hour game simulation. The optimizer also tries to keep Blackjack, Cock Fight, Roulette, Slot Machine and Higher or Lower beneficial and relevant instead of making one game carry the whole economy. "
+                "Every activity group is assumed to play EVERY modeled game the same number of times per five active minutes, using the play-rate input above. Historical game popularity and historical game mix are ignored. The optimizer also tries to keep Blackjack, Cock Fight, Roulette, Slot Machine and Higher or Lower beneficial and relevant instead of making one game carry the whole economy. "
                 "Russian Roulette is intentionally excluded from that balancing goal and is not automatically changed. Locked values are never changed."
             ),
             bg=CARD,
@@ -9505,8 +10045,7 @@ class EconomyViewer:
         tk.Label(
             optimizer_options,
             text=(
-                "Earnings use the server-wide average game result. "
-                "Groups differ by activity level, not by which games they happened to play."
+                "Groups differ only by active time. Every group is assumed to play each game at the fixed plays-per-5-active-minutes rate above."
             ),
             bg=CARD,
             fg=MUTED,
@@ -10852,10 +11391,9 @@ class EconomyViewer:
         self.sim_window_card.set_text(
             (
                 f"You selected {hours:,.2f} hours of history, which is about {days:,.2f} days. "
-                "When you press Run Simulation, the program uses how often people actually played during that time and turns it into "
-                "an easy 'per day' estimate.\n\n"
-                "The explanation here will then tell you, in normal language, roughly how many times each game is played in a day, "
-                "what people usually bet, how much players currently gain or lose from that game, and how your new settings would change that."
+                "History is used to estimate active time and the economics of each game, but it is NOT used to decide how many games somebody plays. "
+                "You choose how many times EACH game is assumed to be played per five active minutes.\n\n"
+                "For example, entering 2 means that during every five minutes a person is active, the simulator assumes 2 Blackjack plays, 2 Cock Fight plays, 2 Roulette plays, and so on."
             )
         )
     def update_page_explanations(self):
@@ -12029,12 +12567,12 @@ class EconomyViewer:
 
         if settings["current_games_per_5m"] <= 0:
             raise ValueError(
-                "Current games per 5 min must be above 0."
+                "Current plays of each game per 5 active minutes must be above 0."
             )
 
         if settings["proposed_games_per_5m"] < 0:
             raise ValueError(
-                "Proposed games per 5 min cannot be negative."
+                "Proposed plays of each game per 5 active minutes cannot be negative."
             )
 
         if (
@@ -12152,11 +12690,11 @@ class EconomyViewer:
             abs_tol=1e-9,
         ):
             play_total_text = (
-                f"People currently play the included games about {current_games:,.1f} times in a normal day, and your new activity setting leaves that about the same."
+                f"Using your fixed plays-per-five-active-minutes input, the included games add up to about {current_games:,.1f} assumed plays in a normal day, and the proposed play rate leaves that about the same."
             )
         else:
             play_total_text = (
-                f"People currently play the included games about {current_games:,.1f} times in a normal day. Your new activity setting changes that to about {proposed_games:,.1f} plays per day."
+                f"Using your fixed plays-per-five-active-minutes input, the included games add up to about {current_games:,.1f} assumed plays in a normal day. The proposed play rate changes that to about {proposed_games:,.1f} assumed plays per day."
             )
 
         lines = [
@@ -12204,7 +12742,7 @@ class EconomyViewer:
                     )
                 else:
                     play_text = (
-                        f"It is currently played about {current_count:,.1f} times per day and would be played about {proposed_count:,.1f} times per day with your new activity setting."
+                        f"The simulator assumes about {current_count:,.1f} plays per day at the current fixed rate and about {proposed_count:,.1f} plays per day at the proposed fixed rate."
                     )
 
                 if current_bet > 0 or proposed_bet > 0:
@@ -12493,7 +13031,7 @@ class EconomyViewer:
                 proposed_game_words = "come out about even"
 
             details.append(
-                f"{game}: about {current_count:,.1f} plays per day now and {proposed_count:,.1f} with the new activity setting. "
+                f"{game}: the fixed-rate assumption gives about {current_count:,.1f} plays per day now and {proposed_count:,.1f} at the proposed rate. "
                 f"Their average bet is about {current_bet:,.1f} now and would be about {proposed_bet:,.1f}. "
                 f"They currently {current_game_words}; with the new settings they would {proposed_game_words}. "
                 f"The difference is {difference:+,.0f} per day."
@@ -12503,8 +13041,8 @@ class EconomyViewer:
 
         self.sim_user_summary_label.config(
             text=(
-                f"Based on how user {user_id} actually played in the selected history, they currently play about {current_games:,.1f} of these games in a normal day. "
-                f"With your new activity setting, that becomes about {proposed_games:,.1f} plays per day. They {current_text}; with the new settings they {proposed_text}. {effect_text} "
+                f"User {user_id}'s history is used only to estimate how many hours per day they are active. The simulator does not copy their historical game counts or game choices. "
+                f"At the fixed plays-per-five-active-minutes rate, that gives about {current_games:,.1f} total assumed game plays per day now and {proposed_games:,.1f} at the proposed rate. They {current_text}; with the new settings they {proposed_text}. {effect_text} "
                 f"{detailed_text}"
             )
         )
