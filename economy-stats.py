@@ -6,6 +6,10 @@ import math
 import statistics
 import copy
 import random
+import os
+import time
+import ctypes
+from ctypes import wintypes
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
@@ -756,6 +760,483 @@ def discord_trim_message(
         trimmed
         + suffix
     )
+
+
+
+def copy_widget_image_to_clipboard(
+    widget,
+):
+    """Copy the exact rendered Tk widget image to the Windows clipboard.
+
+    This uses only the Python standard library and the Windows GDI API. It
+    captures the widget's client area, converts it to a device-independent
+    bitmap, and puts that image on the clipboard so it can be pasted directly
+    into Discord, Paint, image editors, etc.
+    """
+    if os.name != "nt":
+        raise RuntimeError(
+            "Copy Plot Image is currently supported on Windows."
+        )
+
+    widget.update_idletasks()
+    widget.update()
+
+    width = int(
+        widget.winfo_width()
+    )
+    height = int(
+        widget.winfo_height()
+    )
+
+    if width <= 1 or height <= 1:
+        raise RuntimeError(
+            "The plot is not large enough to copy yet."
+        )
+
+    hwnd = wintypes.HWND(
+        widget.winfo_id()
+    )
+
+    user32 = ctypes.WinDLL(
+        "user32",
+        use_last_error=True,
+    )
+    gdi32 = ctypes.WinDLL(
+        "gdi32",
+        use_last_error=True,
+    )
+    kernel32 = ctypes.WinDLL(
+        "kernel32",
+        use_last_error=True,
+    )
+
+    class BITMAPINFOHEADER(
+        ctypes.Structure
+    ):
+        _fields_ = [
+            (
+                "biSize",
+                wintypes.DWORD,
+            ),
+            (
+                "biWidth",
+                wintypes.LONG,
+            ),
+            (
+                "biHeight",
+                wintypes.LONG,
+            ),
+            (
+                "biPlanes",
+                wintypes.WORD,
+            ),
+            (
+                "biBitCount",
+                wintypes.WORD,
+            ),
+            (
+                "biCompression",
+                wintypes.DWORD,
+            ),
+            (
+                "biSizeImage",
+                wintypes.DWORD,
+            ),
+            (
+                "biXPelsPerMeter",
+                wintypes.LONG,
+            ),
+            (
+                "biYPelsPerMeter",
+                wintypes.LONG,
+            ),
+            (
+                "biClrUsed",
+                wintypes.DWORD,
+            ),
+            (
+                "biClrImportant",
+                wintypes.DWORD,
+            ),
+        ]
+
+    class RGBQUAD(
+        ctypes.Structure
+    ):
+        _fields_ = [
+            (
+                "rgbBlue",
+                ctypes.c_ubyte,
+            ),
+            (
+                "rgbGreen",
+                ctypes.c_ubyte,
+            ),
+            (
+                "rgbRed",
+                ctypes.c_ubyte,
+            ),
+            (
+                "rgbReserved",
+                ctypes.c_ubyte,
+            ),
+        ]
+
+    class BITMAPINFO(
+        ctypes.Structure
+    ):
+        _fields_ = [
+            (
+                "bmiHeader",
+                BITMAPINFOHEADER,
+            ),
+            (
+                "bmiColors",
+                RGBQUAD * 1,
+            ),
+        ]
+
+    # Function signatures matter on 64-bit Windows because handles are pointer
+    # sized. Without explicit restypes, ctypes can truncate them.
+    user32.GetDC.argtypes = [
+        wintypes.HWND,
+    ]
+    user32.GetDC.restype = wintypes.HDC
+
+    user32.ReleaseDC.argtypes = [
+        wintypes.HWND,
+        wintypes.HDC,
+    ]
+    user32.ReleaseDC.restype = ctypes.c_int
+
+    user32.OpenClipboard.argtypes = [
+        wintypes.HWND,
+    ]
+    user32.OpenClipboard.restype = wintypes.BOOL
+
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = wintypes.BOOL
+
+    user32.SetClipboardData.argtypes = [
+        wintypes.UINT,
+        wintypes.HANDLE,
+    ]
+    user32.SetClipboardData.restype = wintypes.HANDLE
+
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+
+    gdi32.CreateCompatibleDC.argtypes = [
+        wintypes.HDC,
+    ]
+    gdi32.CreateCompatibleDC.restype = wintypes.HDC
+
+    gdi32.DeleteDC.argtypes = [
+        wintypes.HDC,
+    ]
+    gdi32.DeleteDC.restype = wintypes.BOOL
+
+    gdi32.CreateCompatibleBitmap.argtypes = [
+        wintypes.HDC,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
+    gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+
+    gdi32.SelectObject.argtypes = [
+        wintypes.HDC,
+        wintypes.HGDIOBJ,
+    ]
+    gdi32.SelectObject.restype = wintypes.HGDIOBJ
+
+    gdi32.DeleteObject.argtypes = [
+        wintypes.HGDIOBJ,
+    ]
+    gdi32.DeleteObject.restype = wintypes.BOOL
+
+    gdi32.BitBlt.argtypes = [
+        wintypes.HDC,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.HDC,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.DWORD,
+    ]
+    gdi32.BitBlt.restype = wintypes.BOOL
+
+    gdi32.GetDIBits.argtypes = [
+        wintypes.HDC,
+        wintypes.HBITMAP,
+        wintypes.UINT,
+        wintypes.UINT,
+        ctypes.c_void_p,
+        ctypes.POINTER(
+            BITMAPINFO
+        ),
+        wintypes.UINT,
+    ]
+    gdi32.GetDIBits.restype = ctypes.c_int
+
+    kernel32.GlobalAlloc.argtypes = [
+        wintypes.UINT,
+        ctypes.c_size_t,
+    ]
+    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+
+    kernel32.GlobalLock.argtypes = [
+        wintypes.HGLOBAL,
+    ]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+
+    kernel32.GlobalUnlock.argtypes = [
+        wintypes.HGLOBAL,
+    ]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
+
+    kernel32.GlobalFree.argtypes = [
+        wintypes.HGLOBAL,
+    ]
+    kernel32.GlobalFree.restype = wintypes.HGLOBAL
+
+    SRCCOPY = 0x00CC0020
+    DIB_RGB_COLORS = 0
+    BI_RGB = 0
+    CF_DIB = 8
+    GMEM_MOVEABLE = 0x0002
+
+    source_dc = None
+    memory_dc = None
+    bitmap = None
+    old_object = None
+    global_memory = None
+    clipboard_open = False
+    transferred = False
+
+    try:
+        source_dc = user32.GetDC(
+            hwnd
+        )
+        if not source_dc:
+            raise ctypes.WinError(
+                ctypes.get_last_error()
+            )
+
+        memory_dc = (
+            gdi32.CreateCompatibleDC(
+                source_dc
+            )
+        )
+        if not memory_dc:
+            raise ctypes.WinError(
+                ctypes.get_last_error()
+            )
+
+        bitmap = (
+            gdi32.CreateCompatibleBitmap(
+                source_dc,
+                width,
+                height,
+            )
+        )
+        if not bitmap:
+            raise ctypes.WinError(
+                ctypes.get_last_error()
+            )
+
+        old_object = gdi32.SelectObject(
+            memory_dc,
+            bitmap,
+        )
+
+        if not gdi32.BitBlt(
+            memory_dc,
+            0,
+            0,
+            width,
+            height,
+            source_dc,
+            0,
+            0,
+            SRCCOPY,
+        ):
+            raise RuntimeError(
+                "Windows could not capture the plot image."
+            )
+
+        image_size = (
+            width
+            * height
+            * 4
+        )
+
+        bitmap_info = BITMAPINFO()
+        bitmap_info.bmiHeader.biSize = (
+            ctypes.sizeof(
+                BITMAPINFOHEADER
+            )
+        )
+        bitmap_info.bmiHeader.biWidth = (
+            width
+        )
+        bitmap_info.bmiHeader.biHeight = (
+            height
+        )
+        bitmap_info.bmiHeader.biPlanes = 1
+        bitmap_info.bmiHeader.biBitCount = 32
+        bitmap_info.bmiHeader.biCompression = (
+            BI_RGB
+        )
+        bitmap_info.bmiHeader.biSizeImage = (
+            image_size
+        )
+
+        pixel_buffer = (
+            ctypes.create_string_buffer(
+                image_size
+            )
+        )
+
+        scan_lines = gdi32.GetDIBits(
+            memory_dc,
+            bitmap,
+            0,
+            height,
+            pixel_buffer,
+            ctypes.byref(
+                bitmap_info
+            ),
+            DIB_RGB_COLORS,
+        )
+
+        if scan_lines != height:
+            raise RuntimeError(
+                "Windows could not convert the plot image for the clipboard."
+            )
+
+        header_size = ctypes.sizeof(
+            BITMAPINFOHEADER
+        )
+        clipboard_size = (
+            header_size
+            + image_size
+        )
+
+        global_memory = (
+            kernel32.GlobalAlloc(
+                GMEM_MOVEABLE,
+                clipboard_size,
+            )
+        )
+        if not global_memory:
+            raise ctypes.WinError(
+                ctypes.get_last_error()
+            )
+
+        memory_pointer = (
+            kernel32.GlobalLock(
+                global_memory
+            )
+        )
+        if not memory_pointer:
+            raise ctypes.WinError(
+                ctypes.get_last_error()
+            )
+
+        try:
+            ctypes.memmove(
+                memory_pointer,
+                ctypes.byref(
+                    bitmap_info.bmiHeader
+                ),
+                header_size,
+            )
+            ctypes.memmove(
+                memory_pointer
+                + header_size,
+                pixel_buffer,
+                image_size,
+            )
+        finally:
+            kernel32.GlobalUnlock(
+                global_memory
+            )
+
+        # The clipboard can temporarily be busy, so retry briefly instead of
+        # failing if another app has it open for a few milliseconds.
+        for _ in range(12):
+            if user32.OpenClipboard(
+                hwnd
+            ):
+                clipboard_open = True
+                break
+            time.sleep(
+                0.04
+            )
+
+        if not clipboard_open:
+            raise RuntimeError(
+                "The Windows clipboard is busy. Try Copy Plot Image again."
+            )
+
+        if not user32.EmptyClipboard():
+            raise RuntimeError(
+                "Windows could not clear the clipboard."
+            )
+
+        result = user32.SetClipboardData(
+            CF_DIB,
+            global_memory,
+        )
+
+        if not result:
+            raise RuntimeError(
+                "Windows could not place the plot image on the clipboard."
+            )
+
+        # Ownership of global_memory transfers to Windows after successful
+        # SetClipboardData, so it must not be freed by Python.
+        transferred = True
+        global_memory = None
+
+    finally:
+        if clipboard_open:
+            user32.CloseClipboard()
+
+        if (
+            memory_dc
+            and old_object
+        ):
+            gdi32.SelectObject(
+                memory_dc,
+                old_object,
+            )
+
+        if bitmap:
+            gdi32.DeleteObject(
+                bitmap
+            )
+
+        if memory_dc:
+            gdi32.DeleteDC(
+                memory_dc
+            )
+
+        if source_dc:
+            user32.ReleaseDC(
+                hwnd,
+                source_dc,
+            )
+
+        if (
+            global_memory
+            and not transferred
+        ):
+            kernel32.GlobalFree(
+                global_memory
+            )
 
 
 def safe_median(values):
@@ -12230,9 +12711,9 @@ class EconomyViewer:
 
         self.plot_copy_button = RoundedButton(
             row3,
-            "Copy Plot Data",
-            self.copy_plot_data_for_discord,
-            width=126,
+            "Copy Plot Image",
+            self.copy_plot_image,
+            width=136,
             bg=SECONDARY_BG,
             hover=SECONDARY_HOVER,
             fg=TEXT,
@@ -13314,122 +13795,45 @@ class EconomyViewer:
                 str(error),
             )
 
-    def copy_plot_data_for_discord(self):
-        rows = getattr(
+    def copy_plot_image(self):
+        if not getattr(
             self,
-            "current_plot_rows",
-            [],
-        )
-
-        if not rows:
+            "plot_has_rendered",
+            False,
+        ):
+            messagebox.showinfo(
+                "Copy Plot Image",
+                "Create a plot first.",
+            )
             return
 
-        title = getattr(
-            self,
-            "current_plot_title",
-            "Plot Data",
-        )
+        try:
+            # Redraw immediately before capture so the copied bitmap matches
+            # exactly what is currently visible in the chart.
+            self.plot_canvas.redraw()
+            self.root.update_idletasks()
 
-        lines = [
-            f"**{title}**",
-            "```text",
-        ]
-
-        has_y2 = any(
-            row.get(
-                "y2"
-            ) is not None
-            for row in rows
-        )
-
-        if has_y2:
-            lines.append(
-                f"{'X':<24} {'Y':>12} {'Y2':>12}"
-            )
-            lines.append(
-                f"{'-' * 24} {'-' * 12} {'-' * 12}"
-            )
-        else:
-            lines.append(
-                f"{'X':<28} {'Y':>14}"
-            )
-            lines.append(
-                f"{'-' * 28} {'-' * 14}"
+            copy_widget_image_to_clipboard(
+                self.plot_canvas.canvas
             )
 
-        used = 0
-        for row in rows:
-            x_text = discord_clean_text(
-                row.get(
-                    "x",
-                    "",
-                )
-            )
-            if len(x_text) > 28:
-                x_text = (
-                    x_text[:27]
-                    + "…"
-                )
-
-            if has_y2:
-                line = (
-                    f"{x_text:<24} "
-                    f"{discord_compact_number(row['y1']):>12} "
-                    f"{discord_compact_number(row.get('y2', '')):>12}"
-                )
-            else:
-                line = (
-                    f"{x_text:<28} "
-                    f"{discord_compact_number(row['y1']):>14}"
-                )
-
-            candidate = (
-                "\n".join(
-                    [
-                        *lines,
-                        line,
-                        "```",
-                    ]
-                )
+            self.plot_copy_button.set_text(
+                "Copied Image"
             )
 
-            if len(candidate) > DISCORD_SAFE_MESSAGE_LENGTH:
-                break
-
-            lines.append(
-                line
-            )
-            used += 1
-
-        if used < len(rows):
-            lines.append(
-                f"... {len(rows) - used} more points"
+            self.root.after(
+                1200,
+                lambda:
+                    self.plot_copy_button.set_text(
+                        "Copy Plot Image"
+                    ),
             )
 
-        lines.append(
-            "```"
-        )
-
-        clipboard_text = "\n".join(
-            lines
-        )
-
-        self.root.clipboard_clear()
-        self.root.clipboard_append(
-            clipboard_text
-        )
-        self.root.update()
-
-        self.plot_copy_button.set_text(
-            "Copied"
-        )
-        self.root.after(
-            1200,
-            lambda:
-                self.plot_copy_button.set_text(
-                    "Copy Plot Data"
-                ),
-        )
+        except Exception as error:
+            messagebox.showerror(
+                "Copy Plot Image Error",
+                str(error),
+            )
 
     def build_simulator_page(self):
         page = self.new_page()
