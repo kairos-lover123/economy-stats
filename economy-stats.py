@@ -7,6 +7,7 @@ import statistics
 import copy
 import random
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
@@ -5027,10 +5028,7 @@ class RoundedButton(
         hover=None,
         fg="#FFFFFF",
         radius=13,
-        font=(
-            "Segoe UI Semibold",
-            9,
-        ),
+        font=("Bahnschrift", 9, "bold"),
     ):
         super().__init__(
             parent,
@@ -5410,10 +5408,7 @@ class ExplanationCard(
             fg=TEXT,
             justify=tk.LEFT,
             anchor="w",
-            font=(
-                "Segoe UI Semibold",
-                10,
-            ),
+            font=("Bahnschrift", 10, "bold"),
         )
 
         self.title_label.pack(
@@ -5430,7 +5425,7 @@ class ExplanationCard(
             anchor="w",
             font=(
                 "Segoe UI",
-                9,
+                10,
             ),
         )
 
@@ -5638,10 +5633,7 @@ class KpiCard(
             anchor="nw",
             text=self.title,
             fill=MUTED,
-            font=(
-                "Segoe UI Semibold",
-                9,
-            ),
+            font=("Bahnschrift", 9, "bold"),
         )
 
         self.create_text(
@@ -5650,10 +5642,7 @@ class KpiCard(
             anchor="nw",
             text=self.value,
             fill=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                20,
-            ),
+            font=("Bahnschrift", 20, "bold"),
         )
 
         self.create_text(
@@ -5763,10 +5752,7 @@ class StatusPill(
             h / 2,
             text=self.text,
             fill=self.fg,
-            font=(
-                "Segoe UI Semibold",
-                8,
-            ),
+            font=("Bahnschrift", 8, "bold"),
         )
 
 
@@ -5877,10 +5863,7 @@ class RoundedMenuButton(
             h / 2 - 1,
             text="v",
             fill=MUTED,
-            font=(
-                "Segoe UI Semibold",
-                9,
-            ),
+            font=("Bahnschrift", 9, "bold"),
         )
 
 
@@ -6281,10 +6264,7 @@ class NavButton(
             anchor="w",
             text=self.text,
             fill=fg,
-            font=(
-                "Segoe UI Semibold",
-                9,
-            ),
+            font=("Bahnschrift", 9, "bold"),
         )
 
 
@@ -6482,6 +6462,18 @@ class DataTable(
             int(height),
         )
 
+        # Use the same fonts as the ttk Treeview style so column sizing is
+        # based on the actual rendered text instead of rough character counts.
+        self.body_measure_font = tkfont.Font(
+            family="Segoe UI",
+            size=10,
+        )
+        self.heading_measure_font = tkfont.Font(
+            family="Bahnschrift",
+            size=10,
+            weight="bold",
+        )
+
         self.double_click_callback = (
             double_click_callback
         )
@@ -6504,10 +6496,7 @@ class DataTable(
             text="Search",
             bg=CARD,
             fg=MUTED,
-            font=(
-                "Segoe UI Semibold",
-                9,
-            ),
+            font=("Bahnschrift", 9, "bold"),
         ).pack(
             side=tk.LEFT
         )
@@ -6556,7 +6545,7 @@ class DataTable(
                 fg=MUTED,
                 font=(
                     "Segoe UI",
-                    9,
+                    10,
                 ),
             )
         )
@@ -6781,60 +6770,22 @@ class DataTable(
                 self.sort_by(c),
             )
 
-            width = max(
-                110,
-                min(
-                    230,
-                    len(column)
-                    * 10
-                    + 30,
-                ),
+            width = self.calculate_column_width(
+                column
             )
-
-            if column in {
-                "Reason",
-                "Original Reason",
-                "Top Income Source",
-                "Statistic",
-                "Game Mix",
-            }:
-                width = 240
-
-            elif column == "User ID":
-                width = 170
-
-            elif column in {
-                "Timestamp",
-                "First Seen",
-                "Last Seen",
-                "Hour",
-            }:
-                width = 165
-
-            elif column == "Value":
-                width = 300
-
-            elif column == "Game":
-                width = 155
-
-            elif (
-                "24h" in column
-                or "30d" in column
-            ):
-                width = 155
-
-            elif column in {
-                "Est. Active Min",
-                "Est. Active Hrs",
-                "Activity %",
-                "Tx / Active Hr",
-            }:
-                width = 135
 
             self.tree.column(
                 column,
                 width=width,
-                minwidth=75,
+                minwidth=max(
+                    85,
+                    min(
+                        width,
+                        self.heading_measure_font.measure(
+                            str(column)
+                        ) + 24,
+                    ),
+                ),
                 stretch=False,
                 anchor=(
                     tk.W
@@ -6845,6 +6796,114 @@ class DataTable(
             )
 
         self.refresh()
+
+    def display_value(
+        self,
+        value,
+    ):
+        if isinstance(
+            value,
+            float,
+        ):
+            return format_number(
+                value
+            )
+
+        if isinstance(
+            value,
+            int,
+        ):
+            return f"{value:,}"
+
+        return str(
+            value
+        )
+
+    def calculate_column_width(
+        self,
+        column,
+    ):
+        """Size a Treeview column from its actual heading and cell contents.
+
+        Treeview cells do not wrap, so content-aware widths plus horizontal
+        scrolling are the most reliable way to keep values readable.
+        """
+        heading_width = (
+            self.heading_measure_font.measure(
+                str(column)
+            )
+            + 34
+        )
+
+        max_cell_width = 0
+
+        # Scan the full dataset once when set_data() runs. This is cheap
+        # compared with rendering thousands of Treeview rows and guarantees
+        # that an unusually long value later in the table is still considered.
+        for row in self.data:
+            value = self.display_value(
+                row.get(
+                    column,
+                    "",
+                )
+            )
+
+            measured = (
+                self.body_measure_font.measure(
+                    value
+                )
+                + 30
+            )
+
+            if measured > max_cell_width:
+                max_cell_width = measured
+
+        desired = max(
+            92,
+            heading_width,
+            max_cell_width,
+        )
+
+        # Text-heavy columns can be wide because the table has a horizontal
+        # scrollbar. Numeric columns stay compact enough to scan comfortably.
+        if column == "Original Reason":
+            maximum = 900
+        elif column in {
+            "Reason",
+            "Value",
+            "Statistic",
+            "Game Mix",
+        }:
+            maximum = 620
+        elif column in {
+            "User ID",
+            "Timestamp",
+            "First Seen",
+            "Last Seen",
+            "Hour",
+        }:
+            maximum = 260
+        elif column in {
+            "Group",
+            "Top Income Source",
+            "Most Played Game",
+            "Game",
+        }:
+            maximum = 260
+        elif (
+            "24h" in column
+            or "30d" in column
+        ):
+            maximum = 210
+        else:
+            maximum = 230
+
+        return int(
+            min(
+                maximum,
+                desired,
+            )
+        )
 
     def refresh(self):
         self.tree.delete(
@@ -6897,26 +6956,12 @@ class DataTable(
                     "",
                 )
 
-                if isinstance(
-                    value,
-                    float,
-                ):
-                    value = (
-                        format_number(
-                            value
-                        )
-                    )
-
-                elif isinstance(
-                    value,
-                    int,
-                ):
-                    value = (
-                        f"{value:,}"
-                    )
+                value = self.display_value(
+                    value
+                )
 
                 values.append(
-                    str(value)
+                    value
                 )
 
             absolute_index = (
@@ -6955,7 +7000,7 @@ class DataTable(
         self,
         visible_row_count,
     ):
-        """Shrink small tables instead of leaving a large empty rectangle."""
+        """Fit small tables to all rows and let their card grow when needed."""
         desired_rows = max(
             1,
             min(
@@ -6968,38 +7013,73 @@ class DataTable(
             height=desired_rows
         )
 
+        # Wrapped labels above a table can change height after the first layout
+        # pass. Resize now, after idle, and once more shortly afterwards so the
+        # panel never clips the bottom rows.
+        self.after_idle(
+            self.fit_parent_panel_to_content
+        )
+        self.after(
+            60,
+            self.fit_parent_panel_to_content,
+        )
+
+    def fit_parent_panel_to_content(
+        self,
+    ):
         try:
-            self.update_idletasks()
+            widget = self.master
+            panel = None
 
-            panel = self.master.master
-            if isinstance(
-                panel,
-                RoundedPanel,
-            ):
-                requested_inner_height = (
-                    self.master.winfo_reqheight()
-                )
-
-                desired_panel_height = max(
-                    105,
-                    requested_inner_height
-                    + panel.padding * 2,
-                )
-
-                current_height = int(
-                    float(
-                        panel.cget("height")
-                    )
-                )
-
-                if current_height != int(
-                    desired_panel_height
+            while widget is not None:
+                if isinstance(
+                    widget,
+                    RoundedPanel,
                 ):
-                    panel.configure(
-                        height=int(
-                            desired_panel_height
-                        )
+                    panel = widget
+                    break
+
+                widget = getattr(
+                    widget,
+                    "master",
+                    None,
+                )
+
+            if panel is None:
+                return
+
+            panel.update_idletasks()
+            panel.inner.update_idletasks()
+
+            requested_inner_height = (
+                panel.inner.winfo_reqheight()
+            )
+
+            desired_panel_height = max(
+                112,
+                requested_inner_height
+                + panel.padding * 2
+                + 6,
+            )
+
+            current_height = int(
+                float(
+                    panel.cget(
+                        "height"
                     )
+                )
+            )
+
+            if abs(
+                current_height
+                - desired_panel_height
+            ) > 2:
+                panel.configure(
+                    height=int(
+                        desired_panel_height
+                    )
+                )
+
         except Exception:
             pass
 
@@ -7726,12 +7806,12 @@ class EconomyViewer:
             background=CARD,
             fieldbackground=CARD,
             foreground=TEXT,
-            rowheight=30,
+            rowheight=34,
             borderwidth=0,
             relief=tk.FLAT,
             font=(
                 "Segoe UI",
-                9,
+                10,
             ),
         )
 
@@ -7742,10 +7822,7 @@ class EconomyViewer:
             borderwidth=0,
             relief=tk.FLAT,
             padding=(8, 8),
-            font=(
-                "Segoe UI Semibold",
-                9,
-            ),
+            font=("Bahnschrift", 9, "bold"),
         )
 
         style.map(
@@ -7886,10 +7963,7 @@ class EconomyViewer:
             text="ECONOMY",
             bg=SIDEBAR_BG,
             fg=SIDEBAR_TEXT,
-            font=(
-                "Segoe UI Semibold",
-                17,
-            ),
+            font=("Bahnschrift", 17, "bold"),
         ).pack(
             anchor="w",
             padx=20,
@@ -7901,10 +7975,7 @@ class EconomyViewer:
             text="ANALYTICS",
             bg=SIDEBAR_BG,
             fg=ACCENT_TEXT,
-            font=(
-                "Segoe UI Semibold",
-                10,
-            ),
+            font=("Bahnschrift", 10, "bold"),
         ).pack(
             anchor="w",
             padx=20,
@@ -8055,10 +8126,7 @@ class EconomyViewer:
             text="Economy Analytics",
             bg=APP_BG,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                21,
-            ),
+            font=("Bahnschrift", 21, "bold"),
         ).pack(
             anchor="w"
         )
@@ -8189,10 +8257,7 @@ class EconomyViewer:
             text="Analysis filters",
             bg=CARD,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                12,
-            ),
+            font=("Bahnschrift", 12, "bold"),
         ).pack(
             side=tk.LEFT
         )
@@ -8302,10 +8367,7 @@ class EconomyViewer:
             text="Start",
             bg=CARD,
             fg=MUTED,
-            font=(
-                "Segoe UI Semibold",
-                8,
-            ),
+            font=("Bahnschrift", 8, "bold"),
         ).pack(
             side=tk.LEFT,
             padx=(0, 6),
@@ -8343,10 +8405,7 @@ class EconomyViewer:
             text="End",
             bg=CARD,
             fg=MUTED,
-            font=(
-                "Segoe UI Semibold",
-                8,
-            ),
+            font=("Bahnschrift", 8, "bold"),
         ).pack(
             side=tk.LEFT,
             padx=(0, 6),
@@ -8511,10 +8570,7 @@ class EconomyViewer:
             text=title,
             bg=APP_BG,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                16,
-            ),
+            font=("Bahnschrift", 16, "bold"),
         ).pack(
             anchor="w"
         )
@@ -8526,7 +8582,7 @@ class EconomyViewer:
             fg=MUTED,
             font=(
                 "Segoe UI",
-                9,
+                10,
             ),
         ).pack(
             anchor="w",
@@ -8790,10 +8846,7 @@ class EconomyViewer:
             text="User",
             bg=CARD,
             fg=MUTED,
-            font=(
-                "Segoe UI Semibold",
-                8,
-            ),
+            font=("Bahnschrift", 8, "bold"),
         ).pack(
             side=tk.LEFT,
             padx=(0, 8),
@@ -8875,10 +8928,7 @@ class EconomyViewer:
             text="Money sources",
             bg=CARD,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                11,
-            ),
+            font=("Bahnschrift", 11, "bold"),
         ).pack(
             anchor="w",
             pady=(0, 8),
@@ -8909,10 +8959,7 @@ class EconomyViewer:
             text="User transactions",
             bg=CARD,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                11,
-            ),
+            font=("Bahnschrift", 11, "bold"),
         ).pack(
             anchor="w",
             pady=(0, 8),
@@ -9166,10 +9213,7 @@ class EconomyViewer:
             text="Assumed game frequency",
             bg=CARD,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                11,
-            ),
+            font=("Bahnschrift", 11, "bold"),
         ).pack(
             anchor="w"
         )
@@ -9276,10 +9320,7 @@ class EconomyViewer:
             text="Bet limits",
             bg=CARD,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                11,
-            ),
+            font=("Bahnschrift", 11, "bold"),
         ).grid(
             row=0,
             column=0,
@@ -9307,10 +9348,7 @@ class EconomyViewer:
                 text=heading,
                 bg=CARD,
                 fg=MUTED,
-                font=(
-                    "Segoe UI Semibold",
-                    8,
-                ),
+                font=("Bahnschrift", 8, "bold"),
             ).grid(
                 row=1,
                 column=index,
@@ -9331,10 +9369,7 @@ class EconomyViewer:
                 ),
                 bg=CARD,
                 fg=TEXT,
-                font=(
-                    "Segoe UI Semibold",
-                    9,
-                ),
+                font=("Bahnschrift", 9, "bold"),
             ).grid(
                 row=row_number,
                 column=0,
@@ -9797,10 +9832,7 @@ class EconomyViewer:
             text="Cockfight chicken cost",
             bg=CARD,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                11,
-            ),
+            font=("Bahnschrift", 11, "bold"),
         ).pack(
             anchor="w"
         )
@@ -9905,10 +9937,7 @@ class EconomyViewer:
             text="Slot symbols for commands",
             bg=CARD,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                11,
-            ),
+            font=("Bahnschrift", 11, "bold"),
         ).pack(
             anchor="w"
         )
@@ -9981,10 +10010,7 @@ class EconomyViewer:
             text="Activity group target optimizer",
             bg=CARD,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                11,
-            ),
+            font=("Bahnschrift", 11, "bold"),
         ).pack(
             anchor="w"
         )
@@ -10097,10 +10123,7 @@ class EconomyViewer:
                 anchor="w",
                 bg=CARD,
                 fg=MUTED,
-                font=(
-                    "Segoe UI Semibold",
-                    8,
-                ),
+                font=("Bahnschrift", 8, "bold"),
             ).pack(
                 side=tk.LEFT,
                 padx=(0, 8),
@@ -10148,10 +10171,7 @@ class EconomyViewer:
                 bg=CARD,
                 fg=TEXT,
                 cursor="hand2",
-                font=(
-                    "Segoe UI Semibold",
-                    9,
-                ),
+                font=("Bahnschrift", 9, "bold"),
             )
             group_label.pack(
                 side=tk.LEFT,
@@ -10348,7 +10368,7 @@ class EconomyViewer:
                 wraplength=900,
                 font=(
                     "Segoe UI",
-                    9,
+                    10,
                 ),
             )
         )
@@ -10377,10 +10397,7 @@ class EconomyViewer:
             text="24 hour game impact",
             bg=CARD,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                11,
-            ),
+            font=("Bahnschrift", 11, "bold"),
         ).pack(
             anchor="w",
             pady=(0, 8),
@@ -10419,10 +10436,7 @@ class EconomyViewer:
             ),
             bg=CARD,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                11,
-            ),
+            font=("Bahnschrift", 11, "bold"),
         ).pack(
             anchor="w",
             pady=(0, 8),
@@ -10473,10 +10487,7 @@ class EconomyViewer:
             ),
             bg=CARD,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                11,
-            ),
+            font=("Bahnschrift", 11, "bold"),
         ).pack(
             side=tk.LEFT
         )
@@ -10534,6 +10545,29 @@ class EconomyViewer:
             pady=(0, 10),
         )
 
+        def resize_sim_user_summary(
+            event,
+        ):
+            self.sim_user_summary_label.config(
+                wraplength=max(
+                    300,
+                    event.width - 12,
+                )
+            )
+
+            try:
+                self.sim_user_game_table.after_idle(
+                    self.sim_user_game_table.fit_parent_panel_to_content
+                )
+            except Exception:
+                pass
+
+        individual_panel.inner.bind(
+            "<Configure>",
+            resize_sim_user_summary,
+            add="+",
+        )
+
         self.sim_user_game_table = (
             DataTable(
                 individual_panel.inner,
@@ -10573,10 +10607,7 @@ class EconomyViewer:
             ),
             bg=CARD,
             fg=TEXT,
-            font=(
-                "Segoe UI Semibold",
-                11,
-            ),
+            font=("Bahnschrift", 11, "bold"),
         ).pack(
             side=tk.LEFT
         )
