@@ -6,7 +6,6 @@ import math
 import statistics
 import copy
 import random
-import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
@@ -15,11 +14,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from functools import lru_cache
 
-if getattr(sys, "frozen", False):
-    BASE_DIR = Path(sys.executable).resolve().parent
-else:
-    BASE_DIR = Path(__file__).resolve().parent
-
+BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "economy-stats.dht"
 TABLE_NAME = "message_embeds"
 
@@ -577,6 +572,180 @@ def format_compact(value):
         )
 
     return f"{sign}{value:,.0f}"
+
+
+
+DISCORD_SAFE_MESSAGE_LENGTH = 1900
+
+DISCORD_HEADER_NAMES = {
+    "Net Profit": "Net",
+    "Gross Earned": "Earned",
+    "Gross Lost": "Lost",
+    "Net / Hour": "Net/h",
+    "Transactions": "Tx",
+    "Unique Users": "Users",
+    "People using economy": "Users",
+    "Est. Active Hrs": "Active h",
+    "Estimated Active Hours": "Active h",
+    "Activity %": "Active %",
+    "Economy Activity %": "Active %",
+    "Active Days": "Days",
+    "Estimated Sessions": "Sessions",
+    "Sessions": "Sessions",
+    "Top Income Source": "Top Source",
+    "Top Loss Source": "Top Loss",
+    "30d Net": "30d Net",
+    "30d Projected Net": "30d Net",
+    "24h Current Games": "Cur Plays",
+    "24h Proposed Games": "New Plays",
+    "Current Avg Bet": "Cur Bet",
+    "Proposed Avg Bet": "New Bet",
+    "24h Current Net": "Cur Net",
+    "24h Proposed Net": "New Net",
+    "24h Change": "Change",
+    "Proposed Win %": "Win %",
+    "Avg Active Hrs / Day": "Hrs/day",
+    "Avg Transactions / Day": "Tx/day",
+    "Avg Active Days / 30d": "Days/30d",
+    "Avg 24h Net": "24h Net",
+    "Avg 30d Net": "30d Net",
+}
+
+
+def discord_clean_text(value):
+    text = str(value)
+
+    # Prevent pasted data from accidentally terminating a Discord code block.
+    text = text.replace("```", "~~~")
+    text = text.replace("\t", " ")
+    text = text.replace("\r", " ")
+    text = text.replace("\n", " ")
+
+    return re.sub(
+        r"\s+",
+        " ",
+        text,
+    ).strip()
+
+
+def discord_compact_number(value):
+    try:
+        number = float(value)
+    except Exception:
+        return discord_clean_text(value)
+
+    if math.isnan(number):
+        return ""
+
+    if math.isinf(number):
+        return "INF" if number > 0 else "-INF"
+
+    absolute = abs(number)
+
+    if absolute >= 1_000_000_000:
+        result = f"{number / 1_000_000_000:.2f}B"
+    elif absolute >= 1_000_000:
+        result = f"{number / 1_000_000:.2f}M"
+    elif absolute >= 10_000:
+        result = f"{number / 1_000:.1f}K"
+    elif absolute >= 1_000:
+        result = f"{number:,.0f}"
+    elif float(number).is_integer():
+        result = f"{int(number):,}"
+    else:
+        result = f"{number:,.2f}"
+
+    return result
+
+
+def discord_short_value(value, column=""):
+    if isinstance(value, bool):
+        return str(value)
+
+    if isinstance(
+        value,
+        (
+            int,
+            float,
+        ),
+    ):
+        return discord_compact_number(
+            value
+        )
+
+    text = discord_clean_text(
+        value
+    )
+
+    limits = {
+        "Original Reason": 30,
+        "Reason": 20,
+        "User ID": 20,
+        "Timestamp": 19,
+        "First Seen": 19,
+        "Last Seen": 19,
+        "Game Mix": 28,
+        "Top Income Source": 18,
+        "Top Loss Source": 18,
+        "Statistic": 26,
+        "Value": 32,
+        "Group": 14,
+        "Game": 18,
+    }
+
+    maximum = limits.get(
+        column,
+        16,
+    )
+
+    if len(text) > maximum:
+        text = (
+            text[:max(
+                1,
+                maximum - 1,
+            )]
+            + "…"
+        )
+
+    return text
+
+
+def discord_trim_message(
+    text,
+    limit=DISCORD_SAFE_MESSAGE_LENGTH,
+):
+    text = str(text).strip()
+
+    if len(text) <= limit:
+        return text
+
+    suffix = (
+        "\n\n*Trimmed to fit in one Discord message.*"
+    )
+
+    allowed = max(
+        0,
+        limit - len(suffix),
+    )
+
+    trimmed = text[:allowed].rstrip()
+
+    sentence = max(
+        trimmed.rfind(". "),
+        trimmed.rfind("\n"),
+    )
+
+    if sentence >= int(
+        allowed * 0.75
+    ):
+        trimmed = trimmed[
+            :sentence + 1
+        ].rstrip()
+
+    return (
+        trimmed
+        + suffix
+    )
 
 
 def safe_median(values):
@@ -5408,8 +5577,17 @@ class ExplanationCard(
             bg=INFO_BG,
         )
 
-        self.title_label = tk.Label(
+        title_row = tk.Frame(
             self.inner,
+            bg=INFO_BG,
+        )
+        title_row.pack(
+            fill=tk.X,
+            anchor="w",
+        )
+
+        self.title_label = tk.Label(
+            title_row,
             text=title,
             bg=INFO_BG,
             fg=TEXT,
@@ -5419,8 +5597,31 @@ class ExplanationCard(
         )
 
         self.title_label.pack(
+            side=tk.LEFT,
             fill=tk.X,
+            expand=True,
             anchor="w",
+        )
+
+        self.copy_button = RoundedButton(
+            title_row,
+            "Copy",
+            self.copy_for_discord,
+            width=68,
+            height=30,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+            radius=10,
+            font=(
+                "Bahnschrift",
+                8,
+                "bold",
+            ),
+        )
+        self.copy_button.pack(
+            side=tk.RIGHT,
+            padx=(10, 0),
         )
 
         self.body_label = tk.Label(
@@ -5464,6 +5665,48 @@ class ExplanationCard(
         )
         self.after_idle(
             self._fit_height
+        )
+
+    def copy_for_discord(self):
+        title = self.title_label.cget(
+            "text"
+        ).strip()
+        body = self.body_label.cget(
+            "text"
+        ).strip()
+
+        if not body:
+            return
+
+        if title:
+            clipboard_text = (
+                f"**{title}**\n"
+                f"{body}"
+            )
+        else:
+            clipboard_text = body
+
+        clipboard_text = (
+            discord_trim_message(
+                clipboard_text
+            )
+        )
+
+        self.clipboard_clear()
+        self.clipboard_append(
+            clipboard_text
+        )
+        self.update()
+
+        self.copy_button.set_text(
+            "Copied"
+        )
+        self.after(
+            1200,
+            lambda:
+                self.copy_button.set_text(
+                    "Copy"
+                ),
         )
 
     def _on_configure(
@@ -6541,6 +6784,20 @@ class DataTable(
             side=tk.LEFT
         )
 
+        self.discord_copy_button = RoundedButton(
+            toolbar,
+            "Copy Discord",
+            self.copy_discord_page,
+            width=112,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        )
+        self.discord_copy_button.pack(
+            side=tk.LEFT,
+            padx=(10, 0),
+        )
+
         self.count_label = (
             tk.Label(
                 toolbar,
@@ -6696,6 +6953,13 @@ class DataTable(
         self.menu.add_command(
             label="Copy row",
             command=self.copy_selected,
+        )
+
+        self.menu.add_separator()
+
+        self.menu.add_command(
+            label="Copy current page for Discord",
+            command=self.copy_discord_page,
         )
 
     def clear_search(self):
@@ -7330,6 +7594,362 @@ class DataTable(
 
         finally:
             self.menu.grab_release()
+
+    def infer_discord_title(
+        self,
+    ):
+        columns = set(
+            self.columns
+        )
+
+        if {
+            "Reason",
+            "Net Profit",
+            "Unique Users",
+        }.issubset(columns):
+            return "Income Sources"
+
+        if {
+            "Group",
+            "Members",
+        }.issubset(columns):
+            return "Activity Groups"
+
+        if {
+            "Game",
+            "24h Current Net",
+            "24h Proposed Net",
+        }.issubset(columns):
+            return "Game Simulation"
+
+        if {
+            "Timestamp",
+            "User ID",
+            "Original Reason",
+        }.issubset(columns):
+            return "Transactions"
+
+        if {
+            "User ID",
+            "30d Net",
+        }.issubset(columns):
+            return "Users"
+
+        if {
+            "Statistic",
+            "Value",
+        }.issubset(columns):
+            return "Summary"
+
+        if "Hour" in columns:
+            return "Hourly Results"
+
+        if "Date" in columns:
+            return "Daily Results"
+
+        return "Economy Analytics"
+
+    def get_current_page_rows(
+        self,
+    ):
+        total_rows = len(
+            self.filtered_data
+        )
+
+        start = (
+            self.page_index
+            * self.page_size
+        )
+
+        end = min(
+            total_rows,
+            start + self.page_size,
+        )
+
+        return (
+            start,
+            end,
+            self.filtered_data[
+                start:end
+            ],
+        )
+
+    def build_discord_table(
+        self,
+    ):
+        if (
+            not self.columns
+            or not self.filtered_data
+        ):
+            return ""
+
+        start, end, rows = (
+            self.get_current_page_rows()
+        )
+
+        if not rows:
+            return ""
+
+        headers = [
+            DISCORD_HEADER_NAMES.get(
+                column,
+                column,
+            )
+            for column in self.columns
+        ]
+
+        cell_rows = []
+
+        for row in rows:
+            cell_rows.append(
+                [
+                    discord_short_value(
+                        row.get(
+                            column,
+                            "",
+                        ),
+                        column,
+                    )
+                    for column
+                    in self.columns
+                ]
+            )
+
+        widths = []
+
+        for column_index, header in enumerate(
+            headers
+        ):
+            maximum = len(
+                discord_clean_text(
+                    header
+                )
+            )
+
+            for row in cell_rows:
+                maximum = max(
+                    maximum,
+                    len(
+                        row[
+                            column_index
+                        ]
+                    ),
+                )
+
+            widths.append(
+                maximum
+            )
+
+        numeric_columns = []
+
+        for column_name in self.columns:
+            raw_values = [
+                row.get(
+                    column_name,
+                    "",
+                )
+                for row in rows
+            ]
+
+            nonempty = [
+                raw
+                for raw in raw_values
+                if raw != ""
+            ]
+
+            numeric_columns.append(
+                bool(nonempty)
+                and all(
+                    isinstance(
+                        raw,
+                        (
+                            int,
+                            float,
+                        ),
+                    )
+                    for raw in nonempty
+                )
+            )
+
+        def line_for(
+            values,
+        ):
+            parts = []
+
+            for index, value in enumerate(
+                values
+            ):
+                value = str(
+                    value
+                )
+
+                if numeric_columns[
+                    index
+                ]:
+                    parts.append(
+                        value.rjust(
+                            widths[index]
+                        )
+                    )
+                else:
+                    parts.append(
+                        value.ljust(
+                            widths[index]
+                        )
+                    )
+
+            return "  ".join(
+                parts
+            ).rstrip()
+
+        header_line = line_for(
+            headers
+        )
+
+        separator = "  ".join(
+            "-" * width
+            for width in widths
+        )
+
+        data_lines = [
+            line_for(
+                row
+            )
+            for row in cell_rows
+        ]
+
+        title = self.infer_discord_title()
+
+        total_rows = len(
+            self.filtered_data
+        )
+
+        page_note = ""
+
+        if total_rows > len(rows):
+            page_note = (
+                f" | rows "
+                f"{start + 1}-{end} "
+                f"of {total_rows}"
+            )
+
+        prefix = (
+            f"**{title}**"
+            f"{page_note}\\n"
+            "```text\\n"
+        )
+        suffix = "\\n```"
+
+        kept_lines = []
+        trimmed_count = 0
+
+        for data_line in data_lines:
+            candidate_lines = [
+                header_line,
+                separator,
+                *kept_lines,
+                data_line,
+            ]
+
+            candidate = (
+                prefix
+                + "\\n".join(
+                    candidate_lines
+                )
+                + suffix
+            )
+
+            if len(
+                candidate
+            ) <= DISCORD_SAFE_MESSAGE_LENGTH:
+                kept_lines.append(
+                    data_line
+                )
+            else:
+                trimmed_count += 1
+
+        body_lines = [
+            header_line,
+            separator,
+            *kept_lines,
+        ]
+
+        if trimmed_count:
+            body_lines.append(
+                f"... {trimmed_count} more row"
+                f"{'s' if trimmed_count != 1 else ''}"
+                " on this page"
+            )
+
+        result = (
+            prefix
+            + "\\n".join(
+                body_lines
+            )
+            + suffix
+        )
+
+        if len(
+            result
+        ) > DISCORD_SAFE_MESSAGE_LENGTH:
+            first = rows[0]
+            compact_lines = []
+
+            for column in self.columns:
+                label = DISCORD_HEADER_NAMES.get(
+                    column,
+                    column,
+                )
+                value = discord_short_value(
+                    first.get(
+                        column,
+                        "",
+                    ),
+                    column,
+                )
+
+                compact_lines.append(
+                    f"{label}: {value}"
+                )
+
+            result = (
+                f"**{title}**\\n"
+                "```text\\n"
+                + "\\n".join(
+                    compact_lines
+                )
+                + "\\n```"
+            )
+
+        return discord_trim_message(
+            result
+        )
+
+    def copy_discord_page(self):
+        clipboard_text = (
+            self.build_discord_table()
+        )
+
+        if not clipboard_text:
+            return
+
+        self.clipboard_clear()
+        self.clipboard_append(
+            clipboard_text
+        )
+        self.update()
+
+        self.discord_copy_button.set_text(
+            "Copied"
+        )
+
+        self.after(
+            1200,
+            lambda:
+                self.discord_copy_button.set_text(
+                    "Copy Discord"
+                ),
+        )
 
     def copy_selected(
         self,
@@ -10329,8 +10949,17 @@ class EconomyViewer:
             side=tk.LEFT,
         )
 
-        self.sim_optimizer_status_label = tk.Label(
+        optimizer_status_row = tk.Frame(
             optimizer_inner,
+            bg=CARD,
+        )
+        optimizer_status_row.pack(
+            fill=tk.X,
+            pady=(4, 0),
+        )
+
+        self.sim_optimizer_status_label = tk.Label(
+            optimizer_status_row,
             text=(
                 "The optimizer has not been run. Positive targets mean the average user should gain money. It will also try to keep the normal configurable games broadly useful instead of concentrating all profit into one category. Russian Roulette is excluded."
             ),
@@ -10338,16 +10967,37 @@ class EconomyViewer:
             fg=MUTED,
             justify=tk.LEFT,
             anchor="w",
-            wraplength=1250,
+            wraplength=1120,
             font=(
                 "Segoe UI",
                 8,
             ),
         )
         self.sim_optimizer_status_label.pack(
+            side=tk.LEFT,
             fill=tk.X,
+            expand=True,
             anchor="w",
-            pady=(4, 0),
+        )
+
+        self.sim_optimizer_copy_button = RoundedButton(
+            optimizer_status_row,
+            "Copy",
+            lambda: self.copy_label_for_discord(
+                self.sim_optimizer_status_label,
+                title="Optimizer Result",
+                button=self.sim_optimizer_copy_button,
+                button_text="Copy",
+            ),
+            width=68,
+            height=30,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        )
+        self.sim_optimizer_copy_button.pack(
+            side=tk.RIGHT,
+            padx=(10, 0),
         )
 
         action_panel = RoundedPanel(
@@ -10413,6 +11063,26 @@ class EconomyViewer:
             side=tk.LEFT,
             fill=tk.X,
             expand=True,
+        )
+
+        self.sim_summary_copy_button = RoundedButton(
+            action_row,
+            "Copy",
+            lambda: self.copy_label_for_discord(
+                self.sim_summary_label,
+                title="Simulation Summary",
+                button=self.sim_summary_copy_button,
+                button_text="Copy",
+            ),
+            width=68,
+            height=32,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        )
+        self.sim_summary_copy_button.pack(
+            side=tk.RIGHT,
+            padx=(10, 0),
         )
 
         game_result_panel = (
@@ -10554,6 +11224,25 @@ class EconomyViewer:
             fg=TEXT,
         ).pack(
             side=tk.LEFT
+        )
+
+        self.sim_user_copy_button = RoundedButton(
+            individual_top,
+            "Copy Summary",
+            lambda: self.copy_label_for_discord(
+                self.sim_user_summary_label,
+                title="Individual User Simulation",
+                button=self.sim_user_copy_button,
+                button_text="Copy Summary",
+            ),
+            width=112,
+            bg=SECONDARY_BG,
+            hover=SECONDARY_HOVER,
+            fg=TEXT,
+        )
+        self.sim_user_copy_button.pack(
+            side=tk.LEFT,
+            padx=(10, 0),
         )
 
         self.sim_user_summary_label = (
@@ -13324,6 +14013,57 @@ class EconomyViewer:
             text=status_text
         )
 
+    def copy_label_for_discord(
+        self,
+        label,
+        title=None,
+        button=None,
+        button_text="Copy",
+    ):
+        if label is None:
+            return
+
+        body = str(
+            label.cget(
+                "text"
+            )
+        ).strip()
+
+        if not body:
+            return
+
+        if title:
+            clipboard_text = (
+                f"**{title}**\n"
+                f"{body}"
+            )
+        else:
+            clipboard_text = body
+
+        clipboard_text = (
+            discord_trim_message(
+                clipboard_text
+            )
+        )
+
+        self.root.clipboard_clear()
+        self.root.clipboard_append(
+            clipboard_text
+        )
+        self.root.update()
+
+        if button is not None:
+            button.set_text(
+                "Copied"
+            )
+            self.root.after(
+                1200,
+                lambda:
+                    button.set_text(
+                        button_text
+                    ),
+            )
+
     def copy_simulator_commands(
         self,
     ):
@@ -13601,11 +14341,6 @@ class EconomyViewer:
 
 def main():
     root = tk.Tk()
-
-    icon_path = BASE_DIR / "icon.ico"
-
-    if icon_path.exists():
-        root.iconbitmap(str(icon_path))
 
     EconomyViewer(
         root
