@@ -7,6 +7,7 @@ import statistics
 import copy
 import random
 import os
+import sys
 import time
 import ctypes
 from ctypes import wintypes
@@ -18,7 +19,19 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from functools import lru_cache
 
-BASE_DIR = Path(__file__).resolve().parent
+# When running as a normal .py file, use the script's folder.
+# When packaged with PyInstaller, __file__ points inside the temporary
+# extraction folder for a one-file build, so use the executable's real folder
+# instead. This makes a database placed beside EconomyAnalytics.exe work.
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(
+        sys.executable
+    ).resolve().parent
+else:
+    BASE_DIR = Path(
+        __file__
+    ).resolve().parent
+
 DB_PATH = BASE_DIR / "economy-stats.dht"
 TABLE_NAME = "message_embeds"
 
@@ -1464,7 +1477,10 @@ class EconomyAnalyzer:
             raise FileNotFoundError(
                 "Database not found.\n\n"
                 f"Current database location:\n{db_path}\n\n"
-                "Click 'Choose Database' at the top of the program "
+                "If you are using the packaged EXE, extract the ZIP first and "
+                "place economy-stats.dht in the same folder as the EXE. "
+                "Do not run the EXE directly from inside the ZIP.\n\n"
+                "You can also click 'Choose Database' at the top of the program "
                 "to select a .dht or SQLite database manually."
             )
 
@@ -10197,7 +10213,79 @@ class EconomyViewer:
 
         self.root.after(
             100,
-            self.load_database,
+            self.load_startup_database,
+        )
+
+    def load_startup_database(self):
+        """Load a database beside the app, or ask the user to choose one.
+
+        This is deliberately friendly to packaged .exe builds. The preferred
+        file is economy-stats.dht beside the executable. If that exact name is
+        missing but there is exactly one .dht file in the same folder, use it.
+        Otherwise open the normal database picker instead of failing with an
+        opaque path error.
+        """
+        preferred = Path(
+            self.analyzer.db_path
+        )
+
+        if preferred.exists():
+            self.load_database()
+            return
+
+        search_directories = [
+            BASE_DIR,
+        ]
+
+        current_directory = Path.cwd()
+
+        if (
+            current_directory.resolve()
+            != BASE_DIR.resolve()
+        ):
+            search_directories.append(
+                current_directory
+            )
+
+        candidates = []
+
+        for directory in search_directories:
+            if not directory.exists():
+                continue
+
+            for candidate in directory.glob(
+                "*.dht"
+            ):
+                resolved = candidate.resolve()
+
+                if resolved not in candidates:
+                    candidates.append(
+                        resolved
+                    )
+
+        if len(candidates) == 1:
+            self.analyzer.db_path = (
+                candidates[0]
+            )
+            self.load_database()
+            return
+
+        self.status_label.config(
+            text=(
+                "Database not found beside the app. "
+                "Choose your .dht database."
+            )
+        )
+
+        self.dataset_label.config(
+            text=(
+                "No database selected"
+            )
+        )
+
+        self.root.after(
+            100,
+            self.choose_database,
         )
 
     def toggle_theme(self):
