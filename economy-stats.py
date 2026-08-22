@@ -18979,5 +18979,4 @@ if __name__ == "__main__":
         except tk.TclError:
             pass
 
-    app = EconomyApp(root)
     root.mainloop()
