@@ -19,18 +19,26 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from functools import lru_cache
 
-# When running as a normal .py file, use the script's folder.
-# When packaged with PyInstaller, __file__ points inside the temporary
-# extraction folder for a one-file build, so use the executable's real folder
-# instead. This makes a database placed beside EconomyAnalytics.exe work.
+# Keep user data beside the real application/executable, while bundled
+# resources such as icon.ico are loaded from PyInstaller's resource folder.
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(
         sys.executable
     ).resolve().parent
+
+    RESOURCE_DIR = Path(
+        getattr(
+            sys,
+            "_MEIPASS",
+            BASE_DIR,
+        )
+    )
 else:
     BASE_DIR = Path(
         __file__
     ).resolve().parent
+
+    RESOURCE_DIR = BASE_DIR
 
 DB_PATH = BASE_DIR / "economy-stats.dht"
 TABLE_NAME = "message_embeds"
@@ -18968,15 +18976,156 @@ class EconomyViewer:
             table.export_csv()
 
 
-if __name__ == "__main__":
-    root = tk.Tk()
+def apply_application_icon(
+    root,
+):
+    """Apply the bundled Economy Analytics icon to Tk and Windows.
 
-    icon_path = BASE_DIR / "icon.ico"
+    PyInstaller --onefile extracts bundled data into sys._MEIPASS, while the
+    database deliberately remains beside the real EXE. This helper therefore
+    loads icon.ico from RESOURCE_DIR and also tells Windows to use the same
+    icon for the native window/taskbar entry.
+    """
+    icon_path = (
+        RESOURCE_DIR
+        / "icon.ico"
+    )
 
-    if icon_path.exists():
+    if not icon_path.exists():
+        return
+
+    # Tk-level icon. "default=" also applies the icon to later Toplevel windows.
+    try:
+        root.iconbitmap(
+            default=str(
+                icon_path
+            )
+        )
+    except tk.TclError:
         try:
-            root.iconbitmap(str(icon_path))
+            root.iconbitmap(
+                str(
+                    icon_path
+                )
+            )
         except tk.TclError:
             pass
 
+    if sys.platform != "win32":
+        return
+
+    try:
+        root.update_idletasks()
+
+        user32 = ctypes.windll.user32
+
+        IMAGE_ICON = 1
+        LR_LOADFROMFILE = 0x0010
+        LR_DEFAULTSIZE = 0x0040
+        WM_SETICON = 0x0080
+        ICON_SMALL = 0
+        ICON_BIG = 1
+
+        # Explicitly load both sizes from the ICO. This is a fallback for cases
+        # where Tk's iconbitmap is not what Windows chooses for the taskbar.
+        load_image = user32.LoadImageW
+        load_image.argtypes = [
+            wintypes.HINSTANCE,
+            wintypes.LPCWSTR,
+            wintypes.UINT,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        ]
+        load_image.restype = wintypes.HANDLE
+
+        send_message = user32.SendMessageW
+        send_message.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        send_message.restype = wintypes.LRESULT
+
+        hwnd = wintypes.HWND(
+            root.winfo_id()
+        )
+
+        big_icon = load_image(
+            None,
+            str(icon_path),
+            IMAGE_ICON,
+            0,
+            0,
+            LR_LOADFROMFILE
+            | LR_DEFAULTSIZE,
+        )
+
+        small_icon = load_image(
+            None,
+            str(icon_path),
+            IMAGE_ICON,
+            16,
+            16,
+            LR_LOADFROMFILE,
+        )
+
+        if big_icon:
+            send_message(
+                hwnd,
+                WM_SETICON,
+                ICON_BIG,
+                int(big_icon),
+            )
+
+        if small_icon:
+            send_message(
+                hwnd,
+                WM_SETICON,
+                ICON_SMALL,
+                int(small_icon),
+            )
+
+        # Retain the native icon handles for the lifetime of the root window.
+        # Windows owns/uses these handles while the window exists.
+        root._economy_big_icon = (
+            big_icon
+        )
+        root._economy_small_icon = (
+            small_icon
+        )
+
+    except Exception:
+        # Tk's iconbitmap above is still allowed to succeed even if the native
+        # fallback is unavailable on a particular Windows setup.
+        pass
+
+
+def main():
+    # Windows can otherwise group a Tk application under the generic
+    # Python/Tcl/Tk identity and show the feather/default icon in the taskbar.
+    # Set this before creating the Tk root window.
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "EconomyAnalytics.App"
+            )
+        except Exception:
+            pass
+
+    root = tk.Tk()
+
+    apply_application_icon(
+        root
+    )
+
+    EconomyViewer(
+        root
+    )
+
     root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
