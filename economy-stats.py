@@ -18968,15 +18968,16 @@ class EconomyViewer:
             table.export_csv()
 
 
-def main():
+if __name__ == "__main__":
     root = tk.Tk()
 
-    EconomyViewer(
-        root
-    )
+    icon_path = BASE_DIR / "icon.ico"
 
+    if icon_path.exists():
+        try:
+            root.iconbitmap(str(icon_path))
+        except tk.TclError:
+            pass
+
+    app = EconomyApp(root)
     root.mainloop()
-
-
-if __name__ == "__main__":
-    main()
