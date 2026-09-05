@@ -27,7 +27,7 @@
 > If you only want to read the instructions, the **GitHub page itself is the simplest and recommended way to view this README**.
 
 
-A desktop analytics, visualization, and simulation tool for **UnbelievaBoat Discord economy data** exported into a Discord History Tracker `.dht` database.
+A desktop analytics, visualization, and simulation tool for **UnbelievaBoat Discord economy data** exported into a compatible `.dht` database, either with **Discord History Tracker (DHT)** or the **Economy Assistant** bot.
 
 The program reads UnbelievaBoat balance-change embeds from the database and turns them into easier-to-understand statistics about:
 
@@ -66,7 +66,7 @@ The current application also includes:
 - [1. Download the project from GitHub](#1-download-the-project-from-github)
 - [2. Install Python](#2-install-python)
 - [3. Install Visual Studio](#3-install-visual-studio)
-- [4. Get the Discord messages with Discord History Tracker](#4-get-the-discord-messages-with-discord-history-tracker)
+- [4. Export the Discord economy-log channel](#4-export-the-discord-economy-log-channel)
 - [5. Prepare the database](#5-prepare-the-database)
 - [6. Open and run the source version](#6-open-and-run-the-source-version)
 - [Using the program](#using-the-program)
@@ -85,7 +85,7 @@ The current application also includes:
 
 # What the program does
 
-Economy Analytics reads a Discord History Tracker SQLite database and looks for UnbelievaBoat `Balance updated` embeds.
+Economy Analytics reads a compatible `.dht` SQLite database containing UnbelievaBoat `Balance updated` embeds. The database can come from Discord History Tracker or an Economy Assistant channel export.
 
 It automatically reads information such as:
 
@@ -310,77 +310,30 @@ If Visual Studio is already installed:
 
 ---
 
-# 4. Get the Discord messages with Discord History Tracker
+# 4. Export the Discord economy-log channel
 
-Economy Analytics does not connect directly to Discord.
+Economy Analytics does **not** connect directly to Discord. Before using the analyzer, you need to export the channel that contains the **UnbelievaBoat `Balance updated` logs** into a compatible `.dht` database.
 
-First, use **Discord History Tracker (DHT)** to save the Discord messages into a local `.dht` SQLite database. Economy Analytics then reads that database.
+You can do this in **either of two ways**:
 
-For this project, you normally only need to save the channel or channels that contain the **UnbelievaBoat `Balance updated` embeds**.
+1. use the **Economy Assistant** bot to export the channel directly, or
+2. use **Discord History Tracker (DHT)**.
 
-Official Discord History Tracker website:
+You only need one of these methods.
 
-https://dht.chylex.com/
+## Option A: Export with Economy Assistant
 
-Official source code and releases:
+If the **Economy Assistant** bot is available in your server, this is the simplest method.
 
-https://github.com/chylex/Discord-History-Tracker
-
-## Download Discord History Tracker
-
-1. Open:
-
-   https://dht.chylex.com/
-
-2. Download the latest **Windows 64-bit** desktop version.
-3. Extract the downloaded archive.
-4. Open `DiscordHistoryTracker.exe`.
-
-Use the official website or the official `chylex/Discord-History-Tracker` GitHub repository rather than downloading copies from random websites.
-
-## Create or open the economy database
-
-When Discord History Tracker opens, first check whether you already have an older economy database.
-
-### If an older database already exists
-
-Open the existing `.dht` database instead of creating a new one.
-
-For example:
+Go to the Discord channel that contains the UnbelievaBoat economy logs and run:
 
 ```text
-economy-stats.dht
+@Economy Assistant log-channel
 ```
 
-Using the old database is recommended because Discord History Tracker can continue adding newer messages to the same file. This lets you keep all previously downloaded history and only collect the messages that are missing.
+Use the bot's channel-export result as the database for Economy Analytics.
 
-### If no database exists yet
-
-Create a **new database** and save it as:
-
-```text
-economy-stats.dht
-```
-
-You can save it directly inside the Economy Analytics project folder if you want.
-
-For example:
-
-```text
-EconomyAnalytics/
-│
-├── economy-stats.dht
-├── economy_analytics.py
-└── README.md
-```
-
-Discord History Tracker saves messages into this database as it tracks them.
-
-## Open the Discord channel you want to save
-
-For the economy analyzer, go to the Discord channel containing UnbelievaBoat economy logs.
-
-The messages should look similar to:
+The channel you export should contain the UnbelievaBoat `Balance updated` embeds that you want to analyze, for example:
 
 ```text
 Balance updated
@@ -400,11 +353,89 @@ Amount: Cash: +600 | Bank: 0
 Reason: animal race won
 ```
 
-The analyzer uses these balance-change embeds to determine who gained or lost money and why.
+After the export finishes:
+
+1. download/save the exported `.dht` file from Economy Assistant
+2. optionally rename it to:
+
+```text
+economy-stats.dht
+```
+
+3. put it beside `EconomyAnalytics.exe` if you use the packaged version, or beside the Python source if you run from source
+4. start Economy Analytics, or use **Choose Database** if you keep the file somewhere else
+
+You do **not** need to install Discord History Tracker if you use the Economy Assistant export method.
+
+## Option B: Export with Discord History Tracker (DHT)
+
+You can also create the `.dht` database yourself with **Discord History Tracker**.
+
+Official Discord History Tracker website:
+
+https://dht.chylex.com/
+
+Official source code and releases:
+
+https://github.com/chylex/Discord-History-Tracker
+
+### Download Discord History Tracker
+
+1. Open:
+
+   https://dht.chylex.com/
+
+2. Download the latest **Windows 64-bit** desktop version.
+3. Extract the downloaded archive.
+4. Open `DiscordHistoryTracker.exe`.
+
+Use the official website or the official `chylex/Discord-History-Tracker` GitHub repository rather than downloading copies from random websites.
+
+### Create or open the economy database
+
+When Discord History Tracker opens, first check whether you already have an older economy database.
+
+#### If an older database already exists
+
+Open the existing `.dht` database instead of creating a new one.
+
+For example:
+
+```text
+economy-stats.dht
+```
+
+Using the old database is recommended because Discord History Tracker can continue adding newer messages to the same file. This lets you keep all previously downloaded history and only collect the messages that are missing.
+
+#### If no database exists yet
+
+Create a **new database** and save it as:
+
+```text
+economy-stats.dht
+```
+
+You can save it directly inside the Economy Analytics project folder if you want.
+
+For example:
+
+```text
+EconomyAnalytics/
+│
+├── economy-stats.dht
+├── economy-stats.py
+└── README.md
+```
+
+Discord History Tracker saves messages into this database as it tracks them.
+
+### Open the Discord channel you want to save
+
+Go to the Discord channel containing the UnbelievaBoat economy logs.
 
 You do **not** need to download unrelated channels unless you also want those messages in the database.
 
-## Recommended method: use the DHT browser userscript
+### Recommended DHT method: browser userscript
 
 Recent versions of Discord History Tracker include a browser userscript option. This avoids having to paste the full tracking script into the browser console.
 
@@ -430,11 +461,9 @@ The connection code connects the browser userscript to the Discord History Track
 
 **Do not enter or share your Discord account token.** The DHT connection code is not your Discord account token.
 
-## Alternative method: Copy Tracking Script
+### Alternative DHT method: Copy Tracking Script
 
 Discord History Tracker also provides a **Copy Tracking Script** button in the **Tracking** tab.
-
-This generates the tracking script that connects Discord to the desktop app.
 
 If you use this method:
 
@@ -446,54 +475,41 @@ If you use this method:
 6. Follow Discord History Tracker's instructions for running that script in Discord.
 7. The first time it runs, DHT will show its tracking settings.
 
-The userscript method above is generally easier for a new user because you do not need to repeatedly paste the full tracking script into developer tools.
+The userscript method is generally easier for a new DHT user because you do not need to repeatedly paste the full tracking script into developer tools.
 
-## Let DHT automatically load the history
+### Let DHT automatically load the history
 
-By default, Discord History Tracker can **automatically scroll upward through the channel** to load older messages.
-
-This is the useful "auto-scroller" part.
-
-You generally do not need to sit there manually scrolling through thousands of Discord messages.
+By default, Discord History Tracker can automatically scroll upward through the channel to load older messages.
 
 Once tracking is active:
 
-1. Keep Discord open on the channel being tracked.
-2. Let DHT automatically scroll upward.
-3. DHT reads the messages as they are loaded.
-4. The desktop app saves them into `economy-stats.dht`.
-5. Leave it running until it has reached as far back as you want.
+1. keep Discord open on the channel being tracked
+2. let DHT automatically scroll upward
+3. DHT reads the messages as they are loaded
+4. the desktop app saves them into `economy-stats.dht`
+5. leave it running until it has reached as far back as you want
 
-By default, DHT can also stop or pause when it reaches a message that was already saved. This is useful when you update the same database later because it avoids downloading the same history unnecessarily.
+DHT can also stop or pause when it reaches a message that was already saved. This is useful when updating the same database later because it avoids downloading the same history unnecessarily.
 
-## Tracking several economy-log channels
+### Tracking several economy-log channels with DHT
 
 If your server stores UnbelievaBoat balance logs in more than one channel, track each relevant channel into the **same `economy-stats.dht` database**.
 
-For example:
-
-```text
-#economy-logs
-#old-economy-logs
-#staff-economy-logs
-```
-
 Only include channels whose data you actually want Economy Analytics to analyze.
 
-## Updating the database later
+### Updating a DHT database later
 
 You do not need to start from scratch every time you want newer statistics.
 
-To update your existing database:
+To update an existing DHT database:
 
-1. Open Discord History Tracker.
-2. Choose **Open Database** and select your existing `economy-stats.dht`.
-3. Do **not** create a new database if you want to keep the history you already collected.
-4. Open the relevant Discord log channel.
-5. Connect DHT again.
-6. Start tracking.
-7. Let it collect the newer messages.
-8. When it reaches messages already stored in the database, it can stop instead of reloading the entire channel.
+1. open Discord History Tracker
+2. choose **Open Database** and select the existing `economy-stats.dht`
+3. do not create a new database if you want to keep the old history
+4. open the relevant Discord log channel
+5. connect DHT again
+6. start tracking
+7. let it collect the newer messages
 
 Then reopen Economy Analytics or press:
 
@@ -503,30 +519,24 @@ Reload
 
 to analyze the updated database.
 
-## When is the database ready?
+## Which export method should I use?
 
-Once the messages you want have been saved into the `.dht` database, you can use it with Economy Analytics.
+Use whichever method is easier for you:
 
-It is a good idea to let Discord History Tracker finish writing before moving or copying the database file.
+- **Economy Assistant:** run `@Economy Assistant log-channel` in the economy-log channel and use the exported `.dht` file.
+- **Discord History Tracker:** install DHT and track/export the channel yourself.
 
-If you saved `economy-stats.dht` somewhere else, copy it into the same folder as the Economy Analytics Python file.
+Economy Analytics only cares that the resulting `.dht` file contains the compatible UnbelievaBoat balance-log data it needs.
 
 ## Important privacy note
 
-A Discord History Tracker database can contain:
-
-- Discord user IDs
-- usernames and message contents
-- channel information
-- embeds
-- timestamps
-- other server history
+A `.dht` database may contain Discord user IDs, usernames, message contents, channel information, embeds, timestamps, and other saved server history.
 
 Treat the `.dht` file as private data.
 
-**Do not upload `economy-stats.dht` to GitHub.**
+**Do not upload your real `economy-stats.dht` to GitHub.**
 
-Only archive messages that you are allowed to access, and follow the rules that apply to the server and data you are handling.
+Only export messages that you are allowed to access, and follow the rules that apply to the server and data you are handling.
 
 ---
 
@@ -565,7 +575,7 @@ If `economy-stats.dht` is not found, the program also checks for another `.dht` 
 
 ## What kind of database is expected?
 
-The `.dht` file is an SQLite database produced by Discord History Tracker.
+The `.dht` file is a compatible SQLite database produced either by **Discord History Tracker** or by the **Economy Assistant** `@Economy Assistant log-channel` export.
 
 The program expects a table called:
 
@@ -585,7 +595,7 @@ Reason: chat money
 
 plus a timestamp.
 
-The program also performs a best-effort search of user-related DHT tables to map Discord IDs to usernames. Different DHT versions can store user information slightly differently, so username lookup is deliberately flexible.
+The program also performs a best-effort search of user-related tables to map Discord IDs to usernames. Export formats can store user information slightly differently, so username lookup is deliberately flexible.
 
 If no username can be resolved for a user, the raw Discord user ID is shown instead.
 
@@ -593,7 +603,7 @@ If no username can be resolved for a user, the raw Discord user ID is shown inst
 
 Economy Analytics itself does **not** download Discord messages.
 
-Use Discord History Tracker to create or update the `.dht` database, then open that database in Economy Analytics.
+Create the `.dht` database either with **Economy Assistant** using `@Economy Assistant log-channel` or with **Discord History Tracker**, then open that database in Economy Analytics.
 
 ---
 
@@ -1785,15 +1795,15 @@ If Python works in Command Prompt but Visual Studio cannot see it:
 
 Username display is best-effort.
 
-The program searches user-related tables in the DHT database and attempts to map Discord IDs to usernames.
+The program searches user-related tables in the exported `.dht` database and attempts to map Discord IDs to usernames.
 
 If a particular username cannot be found, the app intentionally falls back to the raw Discord user ID.
 
 Possible reasons include:
 
-- the DHT database does not contain that user's record
-- the DHT version stored user information differently
-- the user record was not captured in the archived history
+- the exported database does not contain that user's record
+- the export method stored user information differently
+- the user record was not captured in the exported history
 - duplicate historical usernames require the app to include an ID for disambiguation
 
 The economy calculations still work when only the ID is available.
@@ -1941,19 +1951,19 @@ from inside the repository folder.
 3. Enable the **Python development** workload.
 4. Download this repository using **Code > Download ZIP**, or clone it with Git.
 5. Extract/open the repository.
-6. Download Discord History Tracker from `https://dht.chylex.com/`.
-7. Open an existing `.dht` database if you already have one, otherwise create one.
-8. Track the channel containing the UnbelievaBoat `Balance updated` logs.
-9. Let DHT collect the history you need.
-10. Put the `.dht` file beside the Python source, or select it manually in the app.
-11. Open the project folder in Visual Studio.
-12. Run the main Python file.
-13. Choose the analysis timeframe.
-14. Press **Apply**.
-15. Use **Activity Groups** for natural user-group comparisons.
-16. Use **Plots** for visual comparisons and relationships.
-17. Use **Game Simulator** and the activity-group optimizer to test balancing changes.
-18. Copy Discord tables, explanation text, simulator commands, or plot images as needed.
+6. Export the economy-log channel using **one** of these methods:
+   - run `@Economy Assistant log-channel` with the Economy Assistant bot, **or**
+   - download Discord History Tracker from `https://dht.chylex.com/` and track the channel yourself.
+7. Save/download the resulting `.dht` database.
+8. Put the `.dht` file beside the Python source, or select it manually in the app.
+9. Open the project folder in Visual Studio.
+10. Run the main Python file.
+11. Choose the analysis timeframe.
+12. Press **Apply**.
+13. Use **Activity Groups** for natural user-group comparisons.
+14. Use **Plots** for visual comparisons and relationships.
+15. Use **Game Simulator** and the activity-group optimizer to test balancing changes.
+16. Copy Discord tables, explanation text, simulator commands, or plot images as needed.
 
 ---
 
@@ -1961,6 +1971,6 @@ from inside the repository folder.
 
 This project is an independent analytics tool.
 
-It is not affiliated with, endorsed by, or maintained by Discord, UnbelievaBoat, or Discord History Tracker.
+It is not affiliated with, endorsed by, or maintained by Discord, UnbelievaBoat, or Discord History Tracker. Economy Assistant is an optional export method for servers where that bot is available.
 
 Simulation, optimizer, activity, correlation, and 30-day results are estimates based on historical data and the assumptions implemented by the program.
