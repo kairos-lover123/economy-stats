@@ -43,6 +43,20 @@ else:
 DB_PATH = BASE_DIR / "economy-stats.dht"
 TABLE_NAME = "message_embeds"
 
+# Ignore corrupted/outlier balance changes larger than 1,000,000.
+# Exactly +1,000,000 and -1,000,000 are valid and remain included.
+MAX_ABS_TRANSACTION = 1_000_000
+
+# 95% bootstrap confidence intervals.
+#
+# The app resamples USERS rather than individual transactions whenever
+# possible. This avoids pretending that 100 transactions from one very active
+# person are 100 independent people.
+BOOTSTRAP_CONFIDENCE = 0.95
+BOOTSTRAP_SAMPLES = 2_000
+BOOTSTRAP_MIN_UNITS = 3
+BOOTSTRAP_SEED = 67
+
 THEMES = {
     "dark": {
         # Soft charcoal dark mode. Intentionally avoids pure black so the
@@ -142,6 +156,10 @@ REASON_RE = re.compile(r"\*\*Reason:\*\*\s*(.*)", re.IGNORECASE | re.DOTALL)
 CHANNEL_MENTION_RE = re.compile(r"<#\d+>")
 USER_MENTION_RE = re.compile(r"<@!?\d+>")
 ROLE_MENTION_RE = re.compile(r"<@&\d+>")
+BUY_ITEM_RE = re.compile(
+    r"^buy\s+item\s*\(\s*(.*?)\s*\)",
+    re.IGNORECASE,
+)
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 
 GAME_ORDER = [
@@ -368,6 +386,73 @@ def clean_reason(reason):
     )
 
     return reason.strip()
+
+
+def normalize_bought_item_name(
+    item_name,
+):
+    """Normalize cosmetic shop-list numbering from bought item names.
+
+    Some historical UnbelievaBoat logs contain shop entries such as:
+        1. VIP
+        2. Hen Expert
+        3. Roulette Master
+
+    The leading number is only the item's position in the shop/list, not part
+    of the actual item name. Removing it prevents the same item from appearing
+    twice in Purchases, for example both `VIP` and `1. VIP`.
+    """
+    item_name = re.sub(
+        r"\s+",
+        " ",
+        str(
+            item_name
+        ).strip(),
+    )
+
+    # Strip one or more leading list-number prefixes such as:
+    # "1. VIP", "03. VIP [Prestige]" or "2) Hen Expert".
+    item_name = re.sub(
+        r"^(?:\d+\s*[.)]\s*)+",
+        "",
+        item_name,
+    ).strip()
+
+    return item_name
+
+
+def extract_bought_item(
+    reason,
+):
+    """Return the normalized item name from `buy item (Item Name)` logs."""
+    cleaned = clean_reason(
+        reason
+    )
+
+    match = BUY_ITEM_RE.match(
+        cleaned
+    )
+
+    if not match:
+        return None
+
+    item_name = normalize_bought_item_name(
+        match.group(1)
+    )
+
+    return (
+        item_name
+        if item_name
+        else None
+    )
+
+
+def purchase_item_key(
+    item_name,
+):
+    return normalize_bought_item_name(
+        item_name
+    ).casefold()
 
 
 def is_chicken_purchase(reason):
@@ -606,7 +691,27 @@ DISCORD_HEADER_NAMES = {
     "Net Profit": "Net",
     "Gross Earned": "Earned",
     "Gross Lost": "Lost",
+    "Net Earned": "Net",
+    "Net Earnings Share %": "Net earn %",
     "Net / Hour": "Net/h",
+    "Net / User / Hour": "Net/user/h",
+    "Net / Hour 95% CI": "Net/h CI",
+    "Net / User / Hour 95% CI": "95% CI",
+    "Net / User Hour 95% CI": "95% CI",
+    "Avg Active Hrs / Day 95% CI": "Hrs/day CI",
+    "Avg Transactions / Day 95% CI": "Tx/day CI",
+    "Avg Active Days / 30d 95% CI": "Days/30d CI",
+    "Avg 24h Net 95% CI": "24h 95% CI",
+    "Avg 30d Net 95% CI": "30d 95% CI",
+    "Participation % 95% CI": "Play % CI",
+    "Avg Plays / Player / Day 95% CI": "Plays 95% CI",
+    "Avg Bet 95% CI": "Bet 95% CI",
+    "Net / Play 95% CI": "Net/play CI",
+    "Avg Net / User 95% CI": "Net/user CI",
+    "Avg 24h Net / Member 95% CI": "24h/m CI",
+    "Avg 30d Net / Member 95% CI": "30d/m CI",
+    "Avg Net Cost / Purchase 95% CI": "Avg/buy CI",
+    "Avg Net Spent / Buyer 95% CI": "Avg/buyer CI",
     "Transactions": "Tx",
     "Unique Users": "Users",
     "People using economy": "Users",
@@ -619,8 +724,11 @@ DISCORD_HEADER_NAMES = {
     "Sessions": "Sessions",
     "Top Income Source": "Top Source",
     "Top Loss Source": "Top Loss",
-    "30d Net": "30d Net",
-    "30d Projected Net": "30d Net",
+    "30d Net": "30d Proj",
+    "30d Projected Net": "30d Proj",
+    "Last 30d Actual": "Last30d",
+    "Avg Last 30d Actual": "Last30d",
+    "Avg Last 30d Actual / Member": "Last30d/m",
     "24h Current Games": "Cur Plays",
     "24h Proposed Games": "New Plays",
     "Current Avg Bet": "Cur Bet",
@@ -639,10 +747,20 @@ DISCORD_HEADER_NAMES = {
     "Avg Plays / Player / Day": "Plays/p/day",
     "Avg Bet": "Avg Bet",
     "Net / Play": "Net/play",
+    "Avg Net / User": "Net/user",
+    "Net / User Hour": "Net/user-h",
     "Avg 24h Net / Member": "Net/m/24h",
     "Avg 30d Net / Member": "Net/m/30d",
     "Active Hrs / Day": "Hrs/day",
     "Transactions / Day": "Tx/day",
+    "Net Spent": "Net spent",
+    "Purchases": "Buys",
+    "Unique Buyers": "Buyers",
+    "Avg Net Cost / Purchase": "Avg/buy",
+    "Avg Net Spent / Buyer": "Avg/buyer",
+    "Last 30d Actual Spent": "Last30d",
+    "Avg Net Cost": "Avg cost",
+    "Net Spend Share %": "Spend %",
 }
 
 
@@ -717,8 +835,6 @@ def discord_short_value(value, column=""):
         "User ID": 20,
         "Username": 24,
         "Timestamp": 19,
-        "First Seen": 19,
-        "Last Seen": 19,
         "Game Mix": 28,
         "Top Income Source": 18,
         "Top Loss Source": 18,
@@ -727,6 +843,14 @@ def discord_short_value(value, column=""):
         "Group": 14,
         "Game": 18,
     }
+
+    # Confidence intervals are already compact numeric strings such as
+    # "-20,002.81 to +18,442.37". Never truncate them in Discord output.
+    # Cutting either endpoint makes the interval misleading/useless.
+    if column.endswith(
+        "95% CI"
+    ):
+        return text
 
     maximum = limits.get(
         column,
@@ -782,6 +906,275 @@ def discord_trim_message(
         + suffix
     )
 
+
+
+
+# ---------------------------------------------------------------------------
+# Simple explanations for every number shown by the application.
+# ---------------------------------------------------------------------------
+# Terminology rule:
+# "earned", "earnings", and an earnings percentage always mean NET after
+# relevant losses/costs are subtracted. Gross Earned is supporting context.
+METRIC_EXPLANATIONS = {
+    "Username": "The Discord username when it can be read from the DHT database. If it cannot, the Discord user ID is shown instead.",
+    "User ID": "The user's Discord numeric ID. It still identifies the same user if their username changes.",
+    "Reason": "The simplified source/category the app assigned to the log, such as work, blackjack or crime.",
+    "Original Reason": "The reason exactly as it appeared in the saved log before the app grouped it.",
+    "Item": "The item name read from a log in the form `buy item (Item Name)`.",
+    "Game": "The game this row is describing.",
+    "Group": "The activity group this row is describing.",
+    "Hour": "The clock hour covered by this row.",
+    "Date": "The calendar day covered by this row.",
+    "Timestamp": "The exact local time when this balance change happened.",
+    "Statistic": "The name of the measurement on this row.",
+    "Value": "The value of the measurement named on the same row.",
+
+    "Net Profit": "The final result after gains and losses are combined. Positive means richer; negative means poorer. This is the main number to use for actual earnings.",
+    "Net Earned": "The final NET amount earned from this source after losses/costs from the same source are subtracted. Positive means real net earnings; negative means a net loss.",
+    "Gross Earned": "All positive payouts added together. It ignores losses, so it is NOT the amount actually earned.",
+    "Gross Lost": "All negative balance changes added together and shown as a positive loss amount. It shows money flowing out before gains are considered.",
+    "Cash": "The cash-part change for this one transaction. Positive adds cash; negative removes cash.",
+    "Bank": "The bank-part change for this one transaction. Positive adds bank money; negative removes it.",
+    "Total": "Cash plus Bank for this transaction. Positive means the user became richer in this event; negative means money left their balance.",
+
+    "30d Net": "A 30-day PROJECTION made by scaling the selected period's NET pace to 30 days. It is not actual recent history.",
+    "30d Projected Net": "A 30-day PROJECTION made by scaling the selected period's NET pace to 30 days. It is not actual recent history.",
+    "Last 30d Actual": "The real, unscaled NET result recorded during the newest 30 days in the database.",
+    "Last 30d Actual Spent": "The real, unscaled NET amount spent on this item during the newest 30 days in the database.",
+    "Avg Last 30d Actual": "The real newest-30-day NET result divided by the number of members in this activity group.",
+    "Avg Last 30d Actual / Member": "The real newest-30-day NET result from this game divided by every member of the group, including non-players.",
+
+    "Net / Hour": "NET result divided by the selected period's hours. Positive means balances grew at that rate; negative means they shrank. This uses clock time, not estimated active time.",
+    "Net / User / Hour": "NET result divided by participating users and then by selected-period hours. Example: +24 means about +24 NET per participating user per hour of the selected timeframe, not that every person literally earned 24 every hour.",
+    "Net / Hour 95% CI": "A 95% user-bootstrap confidence interval for the source's total NET per selected-period hour. Whole users are resampled, then their NET contributions are added. Narrow means the hourly source result is more stable across users; wide means more uncertainty.",
+    "Net / User / Hour 95% CI": "A 95% bootstrap confidence interval for Net / User / Hour. The app repeatedly resamples participating USERS, not transactions. A narrow range means the estimated average is fairly stable; a wide range means it is uncertain. 'Not enough data' means fewer than 3 usable users.",
+    "Net / User Hour 95% CI": "A 95% bootstrap confidence interval for NET per estimated active user-hour. Users are resampled as whole units so one very active user's many transactions do not pretend to be many independent people.",
+    "Avg 24h Net 95% CI": "A 95% bootstrap confidence interval for the activity group's average projected 24-hour NET per member. It reflects differences between the observed members.",
+    "Avg 30d Net 95% CI": "A 95% bootstrap confidence interval for the activity group's average projected 30-day NET per member. This shows uncertainty around the projected group average, not a guarantee that future results will land inside the range.",
+    "Avg Plays / Player / Day 95% CI": "A 95% bootstrap confidence interval for average plays per player per day. Only users who actually played the game are resampled.",
+    "Net / Play 95% CI": "A 95% user-cluster bootstrap confidence interval for game NET per play. Each user is resampled as one unit together with all of their plays and NET result.",
+    "Avg 30d Net / Member 95% CI": "A 95% bootstrap confidence interval for this game's projected 30-day NET contribution per activity-group member. Members who did not play the game still count with a zero game result.",
+    "Net / User Hour": "NET result divided by combined estimated active user-hours. Positive means users gained money per estimated active economy hour; negative means they lost money.",
+    "Net / Play": "The game's NET result divided by estimated plays. Positive means an average play added money to users; negative means an average play removed money.",
+    "Avg Net / User": "This game's NET result divided by every member of the activity group, including members who never played it.",
+    "Avg Net / User 95% CI": "A 95% user-bootstrap confidence interval for this game's average NET effect per activity-group member. Non-players count with zero game NET.",
+
+    "Transactions": "The number of included balance-change log entries. It is a count of balance changes, not always a count of commands.",
+    "Unique Users": "How many different users had at least one transaction for this source.",
+    "Active Users": "How many different users had at least one included balance change in this hour/day.",
+    "People using economy": "How many different users had at least one included economy balance change in the selected period.",
+    "Unique Buyers": "How many different users bought this item at least once.",
+    "Purchases": "How many matching `buy item (...)` purchase log entries were recorded.",
+    "Users Played": "How many members of this activity group played this game at least once.",
+    "Members": "How many users are in this activity group.",
+
+    "Est. Active Hrs": "Estimated economy-active time. Time is split into 5-minute blocks and a block counts once if the user had at least one balance change in it.",
+    "Estimated Active Hours": "Estimated economy-active time. Time is split into 5-minute blocks and a block counts once if the user had at least one balance change in it.",
+    "Activity %": "Estimated active minutes divided by the full selected period. 100% means activity in essentially every 5-minute block of the selected timeframe.",
+    "Economy Activity %": "Estimated active minutes divided by the full selected period. 100% means activity in essentially every 5-minute block of the selected timeframe.",
+    "Sessions": "Estimated separate periods of economy use. A gap longer than 10 minutes starts a new session.",
+    "Estimated Sessions": "Estimated separate periods of economy use. A gap longer than 10 minutes starts a new session.",
+    "Active Days": "How many different calendar days the user had at least one included transaction.",
+    "Active Hrs / Day": "Estimated active hours divided by selected-period days. It describes this user's average economy-active time per day.",
+    "Transactions / Day": "Balance-change count divided by selected-period days.",
+    "Avg Active Hrs / Day": "Average estimated active hours per day for members of this activity group.",
+    "Avg Active Hrs / Day 95% CI": "A 95% user-bootstrap confidence interval for the group's average estimated active hours per day.",
+    "Avg Transactions / Day": "Average balance-change count per day for members of this activity group.",
+    "Avg Transactions / Day 95% CI": "A 95% user-bootstrap confidence interval for the group's average balance-change count per day.",
+    "Avg Active Days / 30d": "The average number of active days out of 30 if the selected period's activity pattern continued. It is scaled and capped at 30.",
+    "Avg Active Days / 30d 95% CI": "A 95% user-bootstrap confidence interval for the group's average active-days-per-30-days estimate.",
+
+    "Participation %": "Users Played divided by group Members, multiplied by 100. 100% means every member of the group played the game.",
+    "Participation % 95% CI": "A 95% Wilson confidence interval for the share of group members who played the game. Wilson intervals work better than a simple normal approximation when the group is small or participation is near 0% or 100%.",
+    "Avg Plays / Player / Day": "Estimated plays per day among ONLY members who actually played this game. Non-players are excluded from this average.",
+    "Avg Bet": "The average historical bet inferred for this game from the selected data.",
+    "Avg Bet 95% CI": "A 95% user-cluster bootstrap confidence interval for the average bet. Whole players are resampled with all of their bets kept together.",
+    "Current Avg Bet": "The average bet the simulator estimates under the CURRENT bet limits.",
+    "Proposed Avg Bet": "The average bet after the same betting style is mapped into the PROPOSED bet limits.",
+    "Proposed Win %": "The simulator's win probability under the proposed settings when that game has a directly modelled chance. 55 means 55%.",
+
+    "Avg 24h Net": "The average member's selected-period NET pace scaled to 24 hours.",
+    "Avg 30d Net": "The average member's selected-period NET pace scaled to 30 days. This is a projection.",
+    "24h Net": "This user's selected-period NET pace scaled to 24 hours.",
+    "Avg 24h Net / Member": "This game's NET result scaled to 24 hours and divided by every member of the activity group.",
+    "Avg 24h Net / Member 95% CI": "A 95% user-bootstrap confidence interval for this game's projected 24-hour NET contribution per group member.",
+    "Avg 30d Net / Member": "This game's NET result scaled to 30 days and divided by every member of the activity group. This is a projection.",
+
+    "Top Income Source": "The source with the user's largest POSITIVE NET result after gains and losses from that source are combined. It is not based on gross payouts.",
+    "Top Loss Source": "The source responsible for the user's largest gross amount lost/spent.",
+
+    "Net Earnings Share %": "This profitable user's positive NET earnings from the source divided by all positive NET earnings from profitable users of that source. Losing/break-even users get 0%.",
+    "Loss Share %": "The share of this user's total gross losses that came from this source.",
+
+    "Net Spent": "The real NET amount spent on the item. Charges increase it; refunds/positive corrections reduce it.",
+    "Avg Net Cost / Purchase": "Net Spent divided by Purchases. It is the average real balance cost of one recorded purchase.",
+    "Avg Net Cost / Purchase 95% CI": "A 95% buyer-cluster bootstrap confidence interval for average NET cost per purchase. Whole buyers are resampled so one buyer making many purchases does not count like many independent people.",
+    "Avg Net Spent / Buyer": "Net Spent divided by Unique Buyers. It shows how much an average buyer spent in the selected period.",
+    "Avg Net Spent / Buyer 95% CI": "A 95% bootstrap confidence interval for average NET spending per buyer.",
+    "Avg Net Cost": "This buyer's Net Spent divided by their number of Purchases for the item.",
+    "Net Spend Share %": "This buyer's positive NET spending divided by all positive NET spending on the item.",
+
+    "24h Current Games": "How many simulated plays of this game happen over 24 hours under the CURRENT play-rate setting.",
+    "24h Proposed Games": "How many simulated plays of this game happen over 24 hours under the PROPOSED play-rate setting.",
+    "24h Current Net": "The estimated 24-hour NET result for users under CURRENT settings. Positive means users gain money; negative means users lose money.",
+    "24h Proposed Net": "The estimated 24-hour NET result for users under PROPOSED settings.",
+    "24h Change": "Proposed 24h Net minus Current 24h Net. Positive means the proposal is better for users; negative means worse.",
+    "Game Mix": "A text summary of historical game activity. It is descriptive history and does not control the simulator's fixed play rate.",
+}
+
+STATISTIC_EXPLANATIONS = {
+    "Selected period starts": "The first time included by the current filters.",
+    "Selected period ends": "The last time included by the current filters.",
+    "Period length": "The amount of clock time between the selected start and end.",
+    "Balance changes": "The number of individual included balance-change log entries after oversized invalid transactions are removed.",
+    "Transactions above 1m ignored": "How many raw balance changes were ignored because their absolute Cash + Bank total was greater than 1,000,000. Exactly 1,000,000 is allowed.",
+    "People using economy": "The number of different users with at least one included balance change.",
+    "Combined time using economy": "All users' estimated active time added together. Two users active for the same hour count as two user-hours. Time comes from 5-minute blocks containing at least one balance change.",
+    "Overall balance change": "Money added minus money removed across everyone. Positive means users collectively became richer; negative means poorer.",
+    "Money added to users": "All positive balance changes added together. This is gross inflow, not NET earnings.",
+    "Money taken from users": "All negative balance changes added together as a positive amount.",
+    "Average balance change per hour": "Overall balance change divided by selected-period hours. Positive means the economy adds money to users over time; negative means it removes money.",
+    "Average balance change per hour 95% CI": "A 95% user-bootstrap confidence interval for the economy's NET balance-change rate per hour. It shows how much the total hourly rate changes when whole users are resampled.",
+    "30-day result at same pace": "A projection that scales the selected period's NET pace to 30 days.",
+    "30-day result 95% CI": "A 95% user-bootstrap confidence interval around the 30-day NET projection. It shows uncertainty caused by differences between users; it is not a guarantee about future months.",
+    "Actual last 30 days": "The real, unscaled NET result from the newest 30 days in the database.",
+    "Removed for every 100 added": "Money taken divided by money added, then multiplied by 100. Below 100 means more entered than left; above 100 means more left than entered; 100 means equal inflow and outflow.",
+
+    "Username": METRIC_EXPLANATIONS["Username"],
+    "Net Profit": METRIC_EXPLANATIONS["Net Profit"],
+    "30d Projected Net": METRIC_EXPLANATIONS["30d Projected Net"],
+    "Last 30d Actual": METRIC_EXPLANATIONS["Last 30d Actual"],
+    "Gross Earned": METRIC_EXPLANATIONS["Gross Earned"],
+    "Gross Lost": METRIC_EXPLANATIONS["Gross Lost"],
+    "Transactions": METRIC_EXPLANATIONS["Transactions"],
+    "Estimated Active Hours": METRIC_EXPLANATIONS["Estimated Active Hours"],
+    "Economy Activity %": METRIC_EXPLANATIONS["Economy Activity %"],
+    "Estimated Sessions": METRIC_EXPLANATIONS["Estimated Sessions"],
+    "Active Days": METRIC_EXPLANATIONS["Active Days"],
+    "Top Income Source": METRIC_EXPLANATIONS["Top Income Source"],
+    "Top Loss Source": METRIC_EXPLANATIONS["Top Loss Source"],
+    "Last Transaction": "The latest included balance-change time for this user.",
+}
+
+
+def simple_value_example(value):
+    if isinstance(
+        value,
+        float,
+    ):
+        return format_number(
+            value
+        )
+
+    if isinstance(
+        value,
+        int,
+    ):
+        return f"{value:,}"
+
+    return str(
+        value
+    )
+
+
+def build_table_number_guide(
+    columns,
+    rows,
+):
+    """Return a simple explanation for every value type in a table."""
+    columns = list(
+        columns
+    )
+    rows = list(
+        rows
+    )
+
+    if not columns:
+        return "There are no values to explain yet because this table has no rows."
+
+    if (
+        "Statistic" in columns
+        and "Value" in columns
+    ):
+        lines = [
+            "Each row is one measurement. Every value currently shown is explained below:"
+        ]
+
+        for row in rows:
+            statistic = str(
+                row.get(
+                    "Statistic",
+                    "",
+                )
+            ).strip()
+
+            if not statistic:
+                continue
+
+            value = row.get(
+                "Value",
+                "",
+            )
+
+            explanation = (
+                STATISTIC_EXPLANATIONS.get(
+                    statistic
+                )
+                or METRIC_EXPLANATIONS.get(
+                    statistic
+                )
+                or "This is the value calculated for this measurement."
+            )
+
+            lines.append(
+                f"\n{statistic} = {simple_value_example(value)}\n{explanation}"
+            )
+
+        return "\n".join(
+            lines
+        )
+
+    lines = [
+        "Every column is explained below. For ordinary money-result columns, + means users became richer and - means users became poorer. Columns that explicitly say Spent or Lost use a positive number to show the size of the spending/loss."
+    ]
+
+    for column in columns:
+        explanation = METRIC_EXPLANATIONS.get(
+            column
+        )
+
+        if explanation is None:
+            numeric_values = [
+                row.get(
+                    column
+                )
+                for row in rows
+                if isinstance(
+                    row.get(
+                        column
+                    ),
+                    (
+                        int,
+                        float,
+                    ),
+                )
+            ]
+
+            if numeric_values:
+                explanation = (
+                    "A numeric measurement for this row. Compare it with other rows in the same column. "
+                    "This newly added column does not yet have a more specific formula description."
+                )
+            else:
+                explanation = "The text or label identifying what this row represents."
+
+        lines.append(
+            f"\n{column}\n{explanation}"
+        )
+
+    return "\n".join(
+        lines
+    )
 
 
 def copy_widget_image_to_clipboard(
@@ -1260,6 +1653,471 @@ def copy_widget_image_to_clipboard(
             )
 
 
+
+def percentile_from_sorted(
+    values,
+    fraction,
+):
+    if not values:
+        return None
+
+    if len(values) == 1:
+        return float(
+            values[0]
+        )
+
+    position = (
+        len(values) - 1
+    ) * float(
+        fraction
+    )
+
+    lower = int(
+        math.floor(
+            position
+        )
+    )
+    upper = int(
+        math.ceil(
+            position
+        )
+    )
+
+    if lower == upper:
+        return float(
+            values[lower]
+        )
+
+    weight = (
+        position
+        - lower
+    )
+
+    return (
+        float(
+            values[lower]
+        )
+        * (
+            1.0
+            - weight
+        )
+        + float(
+            values[upper]
+        )
+        * weight
+    )
+
+
+def bootstrap_mean_ci(
+    values,
+    seed_key="",
+    samples=BOOTSTRAP_SAMPLES,
+    confidence=BOOTSTRAP_CONFIDENCE,
+):
+    """Percentile bootstrap CI for a mean.
+
+    `values` should normally contain one observation per user, not one
+    observation per transaction.
+    """
+    cleaned = [
+        float(
+            value
+        )
+        for value in values
+        if isinstance(
+            value,
+            (
+                int,
+                float,
+            ),
+        )
+        and math.isfinite(
+            float(
+                value
+            )
+        )
+    ]
+
+    unit_count = len(
+        cleaned
+    )
+
+    if (
+        unit_count
+        < BOOTSTRAP_MIN_UNITS
+    ):
+        return None
+
+    rng = random.Random(
+        f"{BOOTSTRAP_SEED}|mean|{seed_key}|{unit_count}"
+    )
+
+    estimates = []
+
+    for _ in range(
+        max(
+            100,
+            int(
+                samples
+            ),
+        )
+    ):
+        total = 0.0
+
+        for _ in range(
+            unit_count
+        ):
+            total += cleaned[
+                rng.randrange(
+                    unit_count
+                )
+            ]
+
+        estimates.append(
+            total
+            / unit_count
+        )
+
+    estimates.sort()
+
+    alpha = (
+        1.0
+        - float(
+            confidence
+        )
+    )
+
+    low = percentile_from_sorted(
+        estimates,
+        alpha / 2.0,
+    )
+    high = percentile_from_sorted(
+        estimates,
+        1.0 - alpha / 2.0,
+    )
+
+    return (
+        float(
+            low
+        ),
+        float(
+            high
+        ),
+    )
+
+
+def bootstrap_ratio_ci(
+    pairs,
+    seed_key="",
+    samples=BOOTSTRAP_SAMPLES,
+    confidence=BOOTSTRAP_CONFIDENCE,
+):
+    """Cluster bootstrap CI for a ratio of summed numerators/denominators.
+
+    Each pair should represent one user:
+        (user_numerator, user_denominator)
+
+    For example, game Net / Play uses:
+        (that user's game net, that user's estimated game plays)
+    """
+    cleaned = []
+
+    for numerator, denominator in pairs:
+        try:
+            numerator = float(
+                numerator
+            )
+            denominator = float(
+                denominator
+            )
+        except Exception:
+            continue
+
+        if (
+            not math.isfinite(
+                numerator
+            )
+            or not math.isfinite(
+                denominator
+            )
+        ):
+            continue
+
+        cleaned.append(
+            (
+                numerator,
+                denominator,
+            )
+        )
+
+    unit_count = len(
+        cleaned
+    )
+
+    if (
+        unit_count
+        < BOOTSTRAP_MIN_UNITS
+    ):
+        return None
+
+    rng = random.Random(
+        f"{BOOTSTRAP_SEED}|ratio|{seed_key}|{unit_count}"
+    )
+
+    estimates = []
+
+    for _ in range(
+        max(
+            100,
+            int(
+                samples
+            ),
+        )
+    ):
+        numerator_total = 0.0
+        denominator_total = 0.0
+
+        for _ in range(
+            unit_count
+        ):
+            numerator, denominator = cleaned[
+                rng.randrange(
+                    unit_count
+                )
+            ]
+
+            numerator_total += (
+                numerator
+            )
+            denominator_total += (
+                denominator
+            )
+
+        if (
+            abs(
+                denominator_total
+            )
+            <= 1e-12
+        ):
+            continue
+
+        estimates.append(
+            numerator_total
+            / denominator_total
+        )
+
+    if (
+        len(
+            estimates
+        )
+        < 100
+    ):
+        return None
+
+    estimates.sort()
+
+    alpha = (
+        1.0
+        - float(
+            confidence
+        )
+    )
+
+    low = percentile_from_sorted(
+        estimates,
+        alpha / 2.0,
+    )
+    high = percentile_from_sorted(
+        estimates,
+        1.0 - alpha / 2.0,
+    )
+
+    return (
+        float(
+            low
+        ),
+        float(
+            high
+        ),
+    )
+
+
+def wilson_proportion_ci(
+    successes,
+    total,
+    confidence=BOOTSTRAP_CONFIDENCE,
+):
+    """Wilson score interval, returned in percentage points."""
+    successes = int(
+        successes
+    )
+    total = int(
+        total
+    )
+
+    if total <= 0:
+        return None
+
+    # The app currently uses 95% confidence intervals. Keep the exact 95%
+    # normal quantile here so scipy is not required.
+    if abs(
+        float(
+            confidence
+        )
+        - 0.95
+    ) < 1e-9:
+        z = 1.959963984540054
+    else:
+        # Sensible fallback if this constant is changed later.
+        z = 1.959963984540054
+
+    p = successes / total
+    z2 = z * z
+
+    denominator = (
+        1.0
+        + z2
+        / total
+    )
+
+    center = (
+        p
+        + z2
+        / (
+            2.0
+            * total
+        )
+    ) / denominator
+
+    margin = (
+        z
+        / denominator
+        * math.sqrt(
+            (
+                p
+                * (
+                    1.0
+                    - p
+                )
+                / total
+            )
+            + (
+                z2
+                / (
+                    4.0
+                    * total
+                    * total
+                )
+            )
+        )
+    )
+
+    return (
+        max(
+            0.0,
+            (
+                center
+                - margin
+            )
+            * 100.0,
+        ),
+        min(
+            100.0,
+            (
+                center
+                + margin
+            )
+            * 100.0,
+        ),
+    )
+
+
+def parse_ci_midpoint(
+    value,
+):
+    """Numeric sort key for strings such as '-9.90 to +4.17'."""
+    text = str(
+        value
+    ).strip()
+
+    match = re.match(
+        r"^([+-]?[\d,]+(?:\.\d+)?)\s+to\s+([+-]?[\d,]+(?:\.\d+)?)$",
+        text,
+    )
+
+    if not match:
+        return None
+
+    try:
+        low = float(
+            match.group(1).replace(
+                ",",
+                "",
+            )
+        )
+        high = float(
+            match.group(2).replace(
+                ",",
+                "",
+            )
+        )
+    except ValueError:
+        return None
+
+    return (
+        low
+        + high
+    ) / 2.0
+
+
+def scale_ci(
+    ci,
+    factor,
+):
+    if ci is None:
+        return None
+
+    factor = float(
+        factor
+    )
+
+    values = [
+        float(
+            ci[0]
+        )
+        * factor,
+        float(
+            ci[1]
+        )
+        * factor,
+    ]
+
+    return (
+        min(
+            values
+        ),
+        max(
+            values
+        ),
+    )
+
+
+def format_ci(
+    ci,
+    decimals=2,
+):
+    if ci is None:
+        return "Not enough data"
+
+    low, high = ci
+
+    return (
+        f"{low:+,.{decimals}f} "
+        f"to "
+        f"{high:+,.{decimals}f}"
+    )
+
+
 def safe_median(values):
     return (
         statistics.median(values)
@@ -1452,6 +2310,7 @@ class EconomyAnalyzer:
 
         self.user_stats = []
         self.reason_stats = []
+        self.purchase_item_stats = []
         self.hourly_stats = []
         self.daily_stats = []
         self.user_hour_stats = []
@@ -1465,6 +2324,8 @@ class EconomyAnalyzer:
         self.analysis_end = None
 
         self.json_column = None
+
+        self.filtered_oversized_transactions = 0
 
         # Discord History Tracker stores user records separately from embeds.
         # Keep a best-effort ID -> username lookup so the UI can use readable
@@ -1486,6 +2347,18 @@ class EconomyAnalyzer:
         self.user_game_transactions = {}
         self._simulation_base_cache = {}
         self._normalized_bet_cache = {}
+        self._ci_cache = {}
+
+        # Actual recent-history cache. These are real, unscaled net changes
+        # from the newest 30 days in the loaded database. They respect the
+        # currently applied reason exclusions and chicken grouping choice.
+        self.actual_30d_start = None
+        self.actual_30d_end = None
+        self.actual_30d_transactions = []
+        self.actual_30d_total_net = 0.0
+        self.actual_30d_net_by_user = {}
+        self.actual_30d_net_by_reason = {}
+        self.actual_30d_net_by_user_reason = {}
 
     def connect(self):
         db_path = Path(self.db_path)
@@ -2036,6 +2909,7 @@ class EconomyAnalyzer:
 
     def load_transactions(self):
         self.all_transactions.clear()
+        self.filtered_oversized_transactions = 0
 
         connection = self.connect()
 
@@ -2153,6 +3027,19 @@ class EconomyAnalyzer:
                 if timestamp is None:
                     continue
 
+                total = (
+                    cash
+                    + bank
+                )
+
+                # Exactly 1,000,000 is allowed. Anything larger in absolute
+                # value is treated as an invalid/corrupted transaction.
+                if abs(
+                    total
+                ) > MAX_ABS_TRANSACTION:
+                    self.filtered_oversized_transactions += 1
+                    continue
+
                 self.all_transactions.append(
                     {
                         "user_id":
@@ -2165,7 +3052,7 @@ class EconomyAnalyzer:
                             bank,
 
                         "total":
-                            cash + bank,
+                            total,
 
                         "original_reason":
                             clean_reason(
@@ -2335,6 +3222,9 @@ class EconomyAnalyzer:
             )
 
         self.transactions = filtered
+        self._ci_cache.clear()
+
+        self.rebuild_actual_30d_cache()
 
         if not self.transactions:
             raise RuntimeError(
@@ -2347,9 +3237,248 @@ class EconomyAnalyzer:
         self.build_summary()
         self.build_user_stats()
         self.build_reason_stats()
+        self.build_purchase_item_stats()
         self.build_hourly_stats()
         self.build_daily_stats()
         self.build_user_hour_stats()
+
+    def rebuild_actual_30d_cache(self):
+        """Build actual net totals for the newest 30 days in the database.
+
+        This window is independent of the selected analysis range. It ends at
+        the newest transaction in the loaded DHT so it can be compared with
+        projected 30-day values from shorter or longer selected periods.
+        """
+        self.actual_30d_transactions = []
+        self.actual_30d_total_net = 0.0
+        self.actual_30d_net_by_user = defaultdict(float)
+        self.actual_30d_net_by_reason = defaultdict(float)
+        self.actual_30d_net_by_user_reason = defaultdict(float)
+
+        if not self.all_transactions:
+            self.actual_30d_start = None
+            self.actual_30d_end = None
+            return
+
+        self.actual_30d_end = (
+            self.all_transactions[-1][
+                "timestamp"
+            ]
+        )
+        self.actual_30d_start = (
+            self.actual_30d_end
+            - timedelta(days=30)
+        )
+
+        for original_tx in self.all_transactions:
+            timestamp = original_tx[
+                "timestamp"
+            ]
+
+            if (
+                timestamp
+                < self.actual_30d_start
+                or timestamp
+                > self.actual_30d_end
+            ):
+                continue
+
+            reason = canonical_reason(
+                original_tx[
+                    "original_reason"
+                ],
+                self.chicken_as_cockfight,
+            )
+
+            if reason in self.excluded_reasons:
+                continue
+
+            tx = dict(
+                original_tx
+            )
+            tx["reason"] = reason
+            tx[
+                "is_chicken_purchase"
+            ] = is_chicken_purchase(
+                original_tx[
+                    "original_reason"
+                ]
+            )
+
+            self.actual_30d_transactions.append(
+                tx
+            )
+
+            user_id = str(
+                tx["user_id"]
+            )
+            total = float(
+                tx["total"]
+            )
+
+            self.actual_30d_total_net += total
+            self.actual_30d_net_by_user[
+                user_id
+            ] += total
+            self.actual_30d_net_by_reason[
+                reason
+            ] += total
+            self.actual_30d_net_by_user_reason[
+                (
+                    user_id,
+                    reason,
+                )
+            ] += total
+
+        self.actual_30d_net_by_user = dict(
+            self.actual_30d_net_by_user
+        )
+        self.actual_30d_net_by_reason = dict(
+            self.actual_30d_net_by_reason
+        )
+        self.actual_30d_net_by_user_reason = dict(
+            self.actual_30d_net_by_user_reason
+        )
+
+    def get_actual_last_30d_net(
+        self,
+        user_id=None,
+        reason=None,
+        user_ids=None,
+    ):
+        """Return the real unscaled net from the newest database 30-day window."""
+        if (
+            user_id is None
+            and reason is None
+            and user_ids is None
+        ):
+            return float(
+                self.actual_30d_total_net
+            )
+
+        if user_id is not None:
+            user_id = str(
+                user_id
+            )
+
+            if reason is None:
+                return float(
+                    self.actual_30d_net_by_user.get(
+                        user_id,
+                        0.0,
+                    )
+                )
+
+            return float(
+                self.actual_30d_net_by_user_reason.get(
+                    (
+                        user_id,
+                        reason,
+                    ),
+                    0.0,
+                )
+            )
+
+        if user_ids is not None:
+            ids = [
+                str(value)
+                for value in user_ids
+            ]
+
+            if reason is None:
+                return sum(
+                    float(
+                        self.actual_30d_net_by_user.get(
+                            value,
+                            0.0,
+                        )
+                    )
+                    for value in ids
+                )
+
+            return sum(
+                float(
+                    self.actual_30d_net_by_user_reason.get(
+                        (
+                            value,
+                            reason,
+                        ),
+                        0.0,
+                    )
+                )
+                for value in ids
+            )
+
+        return float(
+            self.actual_30d_net_by_reason.get(
+                reason,
+                0.0,
+            )
+        )
+
+    def get_actual_30d_window_text(self):
+        if (
+            self.actual_30d_start is None
+            or self.actual_30d_end is None
+        ):
+            return "No recent 30-day window is available."
+
+        return (
+            f"{to_local_string(self.actual_30d_start)} "
+            f"to {to_local_string(self.actual_30d_end)}"
+        )
+
+    def cached_mean_ci(
+        self,
+        cache_key,
+        values,
+    ):
+        key = (
+            "mean",
+            str(
+                cache_key
+            ),
+        )
+
+        if key not in self._ci_cache:
+            self._ci_cache[
+                key
+            ] = bootstrap_mean_ci(
+                values,
+                seed_key=str(
+                    cache_key
+                ),
+            )
+
+        return self._ci_cache[
+            key
+        ]
+
+    def cached_ratio_ci(
+        self,
+        cache_key,
+        pairs,
+    ):
+        key = (
+            "ratio",
+            str(
+                cache_key
+            ),
+        )
+
+        if key not in self._ci_cache:
+            self._ci_cache[
+                key
+            ] = bootstrap_ratio_ci(
+                pairs,
+                seed_key=str(
+                    cache_key
+                ),
+            )
+
+        return self._ci_cache[
+            key
+        ]
 
     def get_analysis_hours(self):
         if (
@@ -2568,18 +3697,18 @@ class EconomyAnalyzer:
         self,
         user_id,
     ):
-        txs = self.get_user_transactions(user_id)
+        txs = self.get_user_transactions(
+            user_id
+        )
 
         grouped = defaultdict(list)
 
         for tx in txs:
-            grouped[tx["reason"]].append(tx)
-
-        total_earned = sum(
-            tx["total"]
-            for tx in txs
-            if tx["total"] > 0
-        )
+            grouped[
+                tx["reason"]
+            ].append(
+                tx
+            )
 
         total_lost = -sum(
             tx["total"]
@@ -2595,13 +3724,13 @@ class EconomyAnalyzer:
                 for tx in reason_txs
             )
 
-            earned = sum(
+            gross_earned = sum(
                 tx["total"]
                 for tx in reason_txs
                 if tx["total"] > 0
             )
 
-            lost = -sum(
+            gross_lost = -sum(
                 tx["total"]
                 for tx in reason_txs
                 if tx["total"] < 0
@@ -2609,26 +3738,231 @@ class EconomyAnalyzer:
 
             rows.append(
                 {
-                    "Reason": reason,
-                    "Net Profit": net,
-                    "Gross Earned": earned,
-                    "Gross Lost": lost,
-                    "Transactions": len(reason_txs),
-                    "Earnings Share %": (
-                        earned / total_earned * 100
-                        if total_earned
-                        else 0
-                    ),
-                    "Loss Share %": (
-                        lost / total_lost * 100
-                        if total_lost
-                        else 0
-                    ),
+                    "Reason":
+                        reason,
+                    "Net Profit":
+                        net,
+                    "Gross Earned":
+                        gross_earned,
+                    "Gross Lost":
+                        gross_lost,
+                    "Transactions":
+                        len(
+                            reason_txs
+                        ),
+                    # Filled after all rows are known. "Earnings" in this app
+                    # always means positive NET earnings, never gross payouts.
+                    "Net Earnings Share %":
+                        0.0,
+                    "Loss Share %":
+                        (
+                            gross_lost
+                            / total_lost
+                            * 100
+                            if total_lost
+                            else 0.0
+                        ),
                 }
             )
 
+        total_positive_net = sum(
+            max(
+                0.0,
+                float(
+                    row[
+                        "Net Profit"
+                    ]
+                ),
+            )
+            for row in rows
+        )
+
+        for row in rows:
+            positive_net = max(
+                0.0,
+                float(
+                    row[
+                        "Net Profit"
+                    ]
+                ),
+            )
+
+            row[
+                "Net Earnings Share %"
+            ] = (
+                positive_net
+                / total_positive_net
+                * 100
+                if total_positive_net > 0
+                else 0.0
+            )
+
         rows.sort(
-            key=lambda row: row["Net Profit"],
+            key=lambda row:
+                row[
+                    "Net Profit"
+                ],
+            reverse=True,
+        )
+
+        return rows
+
+    def get_income_source_user_breakdown(
+        self,
+        reason,
+    ):
+        """Rank users for one income source by NET result.
+
+        Gross Earned and Gross Lost are included only as supporting context.
+        Ranking and every earning percentage are based on net after losses from
+        the same source have already been subtracted.
+        """
+        reason = str(
+            reason
+        ).strip()
+
+        if not reason:
+            return []
+
+        grouped = defaultdict(list)
+
+        for tx in self.transactions:
+            if (
+                tx.get(
+                    "reason"
+                )
+                == reason
+            ):
+                grouped[
+                    str(
+                        tx[
+                            "user_id"
+                        ]
+                    )
+                ].append(
+                    tx
+                )
+
+        hours = self.get_analysis_hours()
+
+        rows = []
+
+        for user_id, user_txs in grouped.items():
+            net = sum(
+                float(
+                    tx[
+                        "total"
+                    ]
+                )
+                for tx in user_txs
+            )
+
+            gross_earned = sum(
+                float(
+                    tx[
+                        "total"
+                    ]
+                )
+                for tx in user_txs
+                if tx[
+                    "total"
+                ] > 0
+            )
+
+            gross_lost = -sum(
+                float(
+                    tx[
+                        "total"
+                    ]
+                )
+                for tx in user_txs
+                if tx[
+                    "total"
+                ] < 0
+            )
+
+            rows.append(
+                {
+                    "Username":
+                        self.get_user_label(
+                            user_id
+                        ),
+                    "Net Earned":
+                        net,
+                    "Net Earnings Share %":
+                        0.0,
+                    "Gross Earned":
+                        gross_earned,
+                    "Gross Lost":
+                        gross_lost,
+                    "Net / Hour":
+                        (
+                            net
+                            / hours
+                            if hours > 0
+                            else 0.0
+                        ),
+                    "Transactions":
+                        len(
+                            user_txs
+                        ),
+                    "Last 30d Actual":
+                        self.get_actual_last_30d_net(
+                            user_id=user_id,
+                            reason=reason,
+                        ),
+                }
+            )
+
+        # Only positive net outcomes count as "earnings". This denominator is
+        # therefore the total positive NET earned by profitable users from the
+        # selected source, not the sum of gross payouts.
+        total_positive_net = sum(
+            max(
+                0.0,
+                float(
+                    row[
+                        "Net Earned"
+                    ]
+                ),
+            )
+            for row in rows
+        )
+
+        for row in rows:
+            positive_net = max(
+                0.0,
+                float(
+                    row[
+                        "Net Earned"
+                    ]
+                ),
+            )
+
+            row[
+                "Net Earnings Share %"
+            ] = (
+                positive_net
+                / total_positive_net
+                * 100
+                if total_positive_net > 0
+                else 0.0
+            )
+
+        rows.sort(
+            key=lambda row:
+                (
+                    float(
+                        row[
+                            "Net Earned"
+                        ]
+                    ),
+                    float(
+                        row[
+                            "Last 30d Actual"
+                        ]
+                    ),
+                ),
             reverse=True,
         )
 
@@ -2704,6 +4038,12 @@ class EconomyAnalyzer:
             ),
             ("Net Profit", net),
             ("30d Projected Net", net * factor),
+            (
+                "Last 30d Actual",
+                self.get_actual_last_30d_net(
+                    user_id=user_id
+                ),
+            ),
             ("Gross Earned", earned),
             ("Gross Lost", lost),
             ("Transactions", len(txs)),
@@ -2771,6 +4111,50 @@ class EconomyAnalyzer:
             for tx in txs
         }
 
+        user_net = defaultdict(
+            float
+        )
+
+        for tx in txs:
+            user_net[
+                str(
+                    tx[
+                        "user_id"
+                    ]
+                )
+            ] += float(
+                tx[
+                    "total"
+                ]
+            )
+
+        user_net_ci = self.cached_mean_ci(
+            "overview:user_net",
+            list(
+                user_net.values()
+            ),
+        )
+
+        total_net_ci = scale_ci(
+            user_net_ci,
+            len(
+                user_net
+            ),
+        )
+        hourly_net_ci = scale_ci(
+            total_net_ci,
+            (
+                1.0
+                / hours
+                if hours > 0
+                else 0.0
+            ),
+        )
+        projected_30d_ci = scale_ci(
+            total_net_ci,
+            factor,
+        )
+
         active_blocks = {
             (
                 tx["user_id"],
@@ -2805,6 +4189,10 @@ class EconomyAnalyzer:
                 len(txs),
             ),
             (
+                "Transactions above 1m ignored",
+                self.filtered_oversized_transactions,
+            ),
+            (
                 "People using economy",
                 len(users),
             ),
@@ -2829,8 +4217,26 @@ class EconomyAnalyzer:
                 net / hours,
             ),
             (
+                "Average balance change per hour 95% CI",
+                format_ci(
+                    hourly_net_ci,
+                    decimals=2,
+                ),
+            ),
+            (
                 "30-day result at same pace",
                 net * factor,
+            ),
+            (
+                "30-day result 95% CI",
+                format_ci(
+                    projected_30d_ci,
+                    decimals=0,
+                ),
+            ),
+            (
+                "Actual last 30 days",
+                self.get_actual_last_30d_net(),
             ),
             (
                 "Removed for every 100 added",
@@ -2892,6 +4298,10 @@ class EconomyAnalyzer:
                     "User ID": user_id,
                     "Net Profit": net,
                     "30d Net": net * factor,
+                    "Last 30d Actual":
+                        self.get_actual_last_30d_net(
+                            user_id=user_id
+                        ),
                     "Gross Earned": earned,
                     "Gross Lost": lost,
                     "Est. Active Hrs": activity["active_hours"],
@@ -2900,12 +4310,6 @@ class EconomyAnalyzer:
                     "Active Days": activity["active_days"],
                     "Top Income Source": top_source,
                     "Transactions": len(txs),
-                    "Last Seen": to_local_string(
-                        max(
-                            tx["timestamp"]
-                            for tx in txs
-                        )
-                    ),
                 }
             )
 
@@ -3277,10 +4681,18 @@ class EconomyAnalyzer:
                         "Group": group_name,
                         "Members": 0,
                         "Avg Active Hrs / Day": 0,
+                        "Avg Active Hrs / Day 95% CI": "Not enough data",
                         "Avg Transactions / Day": 0,
+                        "Avg Transactions / Day 95% CI": "Not enough data",
                         "Avg Active Days / 30d": 0,
+                        "Avg Active Days / 30d 95% CI": "Not enough data",
+                        "Net / User Hour": 0,
+                        "Net / User Hour 95% CI": "Not enough data",
                         "Avg 24h Net": 0,
+                        "Avg 24h Net 95% CI": "Not enough data",
                         "Avg 30d Net": 0,
+                        "Avg 30d Net 95% CI": "Not enough data",
+                        "Avg Last 30d Actual": 0,
                     }
                 )
                 continue
@@ -3305,18 +4717,156 @@ class EconomyAnalyzer:
                 for row in group_records
             )
 
+            total_group_net = sum(
+                row["net"]
+                for row in group_records
+            )
+            total_group_user_hours = sum(
+                row["active_hours"]
+                for row in group_records
+            )
+            net_per_user_hour = (
+                total_group_net
+                / total_group_user_hours
+                if total_group_user_hours > 0
+                else 0.0
+            )
+
+            active_hours_day_ci = (
+                self.cached_mean_ci(
+                    f"activity_group:{basis}:{group_name}:hours_day",
+                    [
+                        row[
+                            "hours_per_day"
+                        ]
+                        for row
+                        in group_records
+                    ],
+                )
+            )
+            transactions_day_ci = (
+                self.cached_mean_ci(
+                    f"activity_group:{basis}:{group_name}:tx_day",
+                    [
+                        row[
+                            "transactions_per_day"
+                        ]
+                        for row
+                        in group_records
+                    ],
+                )
+            )
+            active_days_30d_ci = (
+                self.cached_mean_ci(
+                    f"activity_group:{basis}:{group_name}:days_30d",
+                    [
+                        min(
+                            30.0,
+                            row[
+                                "active_days"
+                            ]
+                            / analysis_days
+                            * 30.0,
+                        )
+                        for row
+                        in group_records
+                    ],
+                )
+            )
+
+            raw_net_ci = (
+                self.cached_mean_ci(
+                    f"activity_group:{basis}:{group_name}:net",
+                    [
+                        row[
+                            "net"
+                        ]
+                        for row
+                        in group_records
+                    ],
+                )
+            )
+
+            net_user_hour_ci = (
+                self.cached_ratio_ci(
+                    f"activity_group:{basis}:{group_name}:net_user_hour",
+                    [
+                        (
+                            row[
+                                "net"
+                            ],
+                            row[
+                                "active_hours"
+                            ],
+                        )
+                        for row
+                        in group_records
+                    ],
+                )
+            )
+
+            net_24h_ci = scale_ci(
+                raw_net_ci,
+                factor24,
+            )
+            net_30d_ci = scale_ci(
+                raw_net_ci,
+                factor30,
+            )
+
             stats.append(
                 {
                     "Group": group_name,
                     "Members": member_count,
                     "Avg Active Hrs / Day": average_hours_per_day,
+                    "Avg Active Hrs / Day 95% CI":
+                        format_ci(
+                            active_hours_day_ci,
+                            decimals=2,
+                        ),
                     "Avg Transactions / Day": average_transactions_per_day,
+                    "Avg Transactions / Day 95% CI":
+                        format_ci(
+                            transactions_day_ci,
+                            decimals=2,
+                        ),
                     "Avg Active Days / 30d": min(
                         30.0,
                         average_active_days_per_30d,
                     ),
+                    "Avg Active Days / 30d 95% CI":
+                        format_ci(
+                            active_days_30d_ci,
+                            decimals=2,
+                        ),
+                    "Net / User Hour":
+                        net_per_user_hour,
+                    "Net / User Hour 95% CI":
+                        format_ci(
+                            net_user_hour_ci,
+                            decimals=2,
+                        ),
                     "Avg 24h Net": average_net * factor24,
+                    "Avg 24h Net 95% CI":
+                        format_ci(
+                            net_24h_ci,
+                            decimals=0,
+                        ),
                     "Avg 30d Net": average_net * factor30,
+                    "Avg 30d Net 95% CI":
+                        format_ci(
+                            net_30d_ci,
+                            decimals=0,
+                        ),
+                    "Avg Last 30d Actual":
+                        (
+                            self.get_actual_last_30d_net(
+                                user_ids=group_users
+                            )
+                            / member_count
+                            if member_count
+                            else 0.0
+                        ),
                 }
             )
 
@@ -3370,6 +4920,7 @@ class EconomyAnalyzer:
                 "member_rows": [],
                 "avg_game_net_per_member_24h": 0.0,
                 "avg_game_net_per_member_30d": 0.0,
+                "avg_actual_30d_net_per_member": 0.0,
             }
 
         analysis_days = max(
@@ -3380,6 +4931,25 @@ class EconomyAnalyzer:
         factor30 = self.get_30_day_factor()
         member_count = len(
             group_users
+        )
+
+        user_stats_by_id = {
+            str(row["User ID"]):
+                row
+            for row in self.user_stats
+        }
+
+        total_group_user_hours = sum(
+            float(
+                user_stats_by_id.get(
+                    str(user_id),
+                    {},
+                ).get(
+                    "Est. Active Hrs",
+                    0.0,
+                )
+            )
+            for user_id in group_users
         )
 
         total_game_net = 0.0
@@ -3457,6 +5027,144 @@ class EconomyAnalyzer:
                 else 0.0
             )
 
+            per_player_daily_plays = []
+            per_player_net_round_pairs = []
+            per_player_bet_pairs = []
+            per_member_net_hours_pairs = []
+            per_member_game_net = []
+
+            for user_id in group_users:
+                user_game_txs = (
+                    self.user_game_transactions
+                    .get(
+                        str(
+                            user_id
+                        ),
+                        {},
+                    )
+                    .get(
+                        game,
+                        [],
+                    )
+                )
+
+                user_game_net = sum(
+                    float(
+                        tx[
+                            "total"
+                        ]
+                    )
+                    for tx in user_game_txs
+                )
+
+                per_member_game_net.append(
+                    user_game_net
+                )
+
+                user_row = user_stats_by_id.get(
+                    str(
+                        user_id
+                    ),
+                    {},
+                )
+                user_active_hours = float(
+                    user_row.get(
+                        "Est. Active Hrs",
+                        0.0,
+                    )
+                )
+
+                per_member_net_hours_pairs.append(
+                    (
+                        user_game_net,
+                        user_active_hours,
+                    )
+                )
+
+                if user_game_txs:
+                    user_rounds = float(
+                        self.estimate_game_rounds(
+                            game,
+                            user_game_txs,
+                        )
+                    )
+
+                    if user_rounds > 0:
+                        per_player_daily_plays.append(
+                            user_rounds
+                            / analysis_days
+                        )
+                        per_player_net_round_pairs.append(
+                            (
+                                user_game_net,
+                                user_rounds,
+                            )
+                        )
+
+                    user_bets = self.infer_game_bets(
+                        game,
+                        user_game_txs,
+                        DEFAULT_SLOT_MULTIPLIER,
+                    )
+
+                    if user_bets:
+                        per_player_bet_pairs.append(
+                            (
+                                sum(
+                                    float(
+                                        bet
+                                    )
+                                    for bet in user_bets
+                                ),
+                                len(
+                                    user_bets
+                                ),
+                            )
+                        )
+
+            participation_ci = wilson_proportion_ci(
+                player_count,
+                member_count,
+            )
+            plays_per_player_ci = (
+                self.cached_mean_ci(
+                    f"group_game:{basis}:{group_name}:{game}:plays_player_day",
+                    per_player_daily_plays,
+                )
+            )
+            avg_bet_ci = (
+                self.cached_ratio_ci(
+                    f"group_game:{basis}:{group_name}:{game}:avg_bet",
+                    per_player_bet_pairs,
+                )
+            )
+            net_per_play_ci = (
+                self.cached_ratio_ci(
+                    f"group_game:{basis}:{group_name}:{game}:net_play",
+                    per_player_net_round_pairs,
+                )
+            )
+            net_user_hour_ci = (
+                self.cached_ratio_ci(
+                    f"group_game:{basis}:{group_name}:{game}:net_user_hour",
+                    per_member_net_hours_pairs,
+                )
+            )
+            game_net_per_member_ci = (
+                self.cached_mean_ci(
+                    f"group_game:{basis}:{group_name}:{game}:net_member",
+                    per_member_game_net,
+                )
+            )
+            game_24h_member_ci = scale_ci(
+                game_net_per_member_ci,
+                factor24,
+            )
+            game_30d_member_ci = scale_ci(
+                game_net_per_member_ci,
+                factor30,
+            )
+
             total_game_net += net
 
             game_rows.append(
@@ -3475,6 +5183,11 @@ class EconomyAnalyzer:
                             if member_count
                             else 0.0
                         ),
+                    "Participation % 95% CI":
+                        format_ci(
+                            participation_ci,
+                            decimals=2,
+                        ),
                     "Avg Plays / Player / Day":
                         (
                             rounds
@@ -3483,14 +5196,53 @@ class EconomyAnalyzer:
                             if player_count
                             else 0.0
                         ),
+                    "Avg Plays / Player / Day 95% CI":
+                        format_ci(
+                            plays_per_player_ci,
+                            decimals=2,
+                        ),
                     "Avg Bet":
                         average_bet,
+                    "Avg Bet 95% CI":
+                        format_ci(
+                            avg_bet_ci,
+                            decimals=2,
+                        ),
                     "Net / Play":
                         (
                             net
                             / rounds
                             if rounds
                             else 0.0
+                        ),
+                    "Net / Play 95% CI":
+                        format_ci(
+                            net_per_play_ci,
+                            decimals=2,
+                        ),
+                    "Avg Net / User":
+                        (
+                            net
+                            / member_count
+                            if member_count
+                            else 0.0
+                        ),
+                    "Avg Net / User 95% CI":
+                        format_ci(
+                            game_net_per_member_ci,
+                            decimals=2,
+                        ),
+                    "Net / User Hour":
+                        (
+                            net
+                            / total_group_user_hours
+                            if total_group_user_hours > 0
+                            else 0.0
+                        ),
+                    "Net / User Hour 95% CI":
+                        format_ci(
+                            net_user_hour_ci,
+                            decimals=2,
                         ),
                     "Avg 24h Net / Member":
                         (
@@ -3500,10 +5252,30 @@ class EconomyAnalyzer:
                             if member_count
                             else 0.0
                         ),
+                    "Avg 24h Net / Member 95% CI":
+                        format_ci(
+                            game_24h_member_ci,
+                            decimals=0,
+                        ),
                     "Avg 30d Net / Member":
                         (
                             net
                             * factor30
+                            / member_count
+                            if member_count
+                            else 0.0
+                        ),
+                    "Avg 30d Net / Member 95% CI":
+                        format_ci(
+                            game_30d_member_ci,
+                            decimals=0,
+                        ),
+                    "Avg Last 30d Actual / Member":
+                        (
+                            self.get_actual_last_30d_net(
+                                user_ids=group_users,
+                                reason=game,
+                            )
                             / member_count
                             if member_count
                             else 0.0
@@ -3518,12 +5290,6 @@ class EconomyAnalyzer:
                 ],
             reverse=True,
         )
-
-        user_stats_by_id = {
-            str(row["User ID"]):
-                row
-            for row in self.user_stats
-        }
 
         member_rows = []
 
@@ -3576,6 +5342,29 @@ class EconomyAnalyzer:
                                 ]
                             )
                             * factor30
+                        ),
+                    "Last 30d Actual":
+                        self.get_actual_last_30d_net(
+                            user_id=user_id
+                        ),
+                    "Net / User Hour":
+                        (
+                            float(
+                                row[
+                                    "Net Profit"
+                                ]
+                            )
+                            / float(
+                                row[
+                                    "Est. Active Hrs"
+                                ]
+                            )
+                            if float(
+                                row[
+                                    "Est. Active Hrs"
+                                ]
+                            ) > 0
+                            else 0.0
                         ),
                     "Top Income Source":
                         row.get(
@@ -3634,6 +5423,15 @@ class EconomyAnalyzer:
                 (
                     total_game_net
                     * factor30
+                    / member_count
+                    if member_count
+                    else 0.0
+                ),
+            "avg_actual_30d_net_per_member":
+                (
+                    self.get_actual_last_30d_net(
+                        user_ids=group_users
+                    )
                     / member_count
                     if member_count
                     else 0.0
@@ -3856,6 +5654,65 @@ class EconomyAnalyzer:
             )
 
         return predictions
+
+    def evaluate_activity_group_monthly_ci(
+        self,
+        settings,
+        context,
+    ):
+        """95% bootstrap CI for average simulated 30-day NET per group member.
+
+        Game model/economics are held fixed. The CI captures variation in the
+        observed members' activity levels, which is the user-level uncertainty
+        that the simulator can estimate cleanly without rerunning the entire
+        game model thousands of times.
+        """
+        unit_metrics = (
+            self.build_game_unit_metrics(
+                settings
+            )
+        )
+
+        result = {}
+
+        for group_name in ACTIVITY_GROUP_NAMES:
+            member_ids = list(
+                context[
+                    "members"
+                ].get(
+                    group_name,
+                    set(),
+                )
+            )
+
+            monthly_values = []
+
+            for user_id in member_ids:
+                _, summary = (
+                    self.simulation_scope(
+                        settings,
+                        user_id=user_id,
+                        unit_metrics=unit_metrics,
+                    )
+                )
+
+                monthly_values.append(
+                    float(
+                        summary[
+                            "24h_proposed_net"
+                        ]
+                    )
+                    * 30.0
+                )
+
+            result[
+                group_name
+            ] = self.cached_mean_ci(
+                f"sim_group:{group_name}:{repr(settings)}",
+                monthly_values,
+            )
+
+        return result
 
     def optimize_activity_targets(
         self,
@@ -4625,6 +6482,388 @@ class EconomyAnalyzer:
             ),
         }
 
+    def iter_item_purchase_transactions(
+        self,
+        transactions=None,
+    ):
+        """Yield `(item_name, transaction)` for `buy item (...)` logs.
+
+        The transaction list supplied here is already filtered by the app.
+        This means Chicken purchases still follow the current Chicken grouping
+        choice, and excluded categories remain excluded from the purchase page.
+        """
+        if transactions is None:
+            transactions = (
+                self.transactions
+            )
+
+        for tx in transactions:
+            item_name = extract_bought_item(
+                tx.get(
+                    "original_reason",
+                    "",
+                )
+            )
+
+            if item_name is None:
+                continue
+
+            yield (
+                item_name,
+                tx,
+            )
+
+    def get_actual_last_30d_item_spend(
+        self,
+        item_name,
+        user_id=None,
+    ):
+        """Return actual NET spend for one item in the newest DB 30 days.
+
+        Positive means money left user balances for the item. A refund or other
+        positive balance adjustment with the same buy-item reason reduces the
+        net spend instead of being counted as additional spending.
+        """
+        target_key = purchase_item_key(
+            item_name
+        )
+
+        total_balance_change = 0.0
+
+        for parsed_item, tx in (
+            self.iter_item_purchase_transactions(
+                self.actual_30d_transactions
+            )
+        ):
+            if (
+                purchase_item_key(
+                    parsed_item
+                )
+                != target_key
+            ):
+                continue
+
+            if (
+                user_id is not None
+                and str(
+                    tx[
+                        "user_id"
+                    ]
+                )
+                != str(
+                    user_id
+                )
+            ):
+                continue
+
+            total_balance_change += float(
+                tx[
+                    "total"
+                ]
+            )
+
+        return -total_balance_change
+
+    def build_purchase_item_stats(self):
+        grouped = defaultdict(
+            list
+        )
+        display_names = {}
+
+        for item_name, tx in (
+            self.iter_item_purchase_transactions()
+        ):
+            key = purchase_item_key(
+                item_name
+            )
+
+            if not key:
+                continue
+
+            grouped[
+                key
+            ].append(
+                tx
+            )
+
+            if key not in display_names:
+                display_names[
+                    key
+                ] = item_name
+
+        rows = []
+
+        for key, txs in grouped.items():
+            item_name = display_names[
+                key
+            ]
+
+            # Purchases normally have negative balance changes. Using the
+            # negative of the summed balance change gives NET spend and also
+            # handles any unusual positive refund/correction entries correctly.
+            net_spent = -sum(
+                float(
+                    tx[
+                        "total"
+                    ]
+                )
+                for tx in txs
+            )
+
+            buyers = {
+                str(
+                    tx[
+                        "user_id"
+                    ]
+                )
+                for tx in txs
+            }
+
+            purchase_count = len(
+                txs
+            )
+            buyer_count = len(
+                buyers
+            )
+
+            buyer_txs = defaultdict(
+                list
+            )
+
+            for tx in txs:
+                buyer_txs[
+                    str(
+                        tx[
+                            "user_id"
+                        ]
+                    )
+                ].append(
+                    tx
+                )
+
+            buyer_net_spend = []
+            buyer_spend_purchase_pairs = []
+
+            for user_id, user_txs in buyer_txs.items():
+                user_net_spent = -sum(
+                    float(
+                        tx[
+                            "total"
+                        ]
+                    )
+                    for tx in user_txs
+                )
+
+                buyer_net_spend.append(
+                    user_net_spent
+                )
+                buyer_spend_purchase_pairs.append(
+                    (
+                        user_net_spent,
+                        len(
+                            user_txs
+                        ),
+                    )
+                )
+
+            avg_cost_purchase_ci = (
+                self.cached_ratio_ci(
+                    f"purchase:{key}:cost_purchase",
+                    buyer_spend_purchase_pairs,
+                )
+            )
+            avg_spend_buyer_ci = (
+                self.cached_mean_ci(
+                    f"purchase:{key}:spend_buyer",
+                    buyer_net_spend,
+                )
+            )
+
+            rows.append(
+                {
+                    "Item":
+                        item_name,
+                    "Net Spent":
+                        net_spent,
+                    "Purchases":
+                        purchase_count,
+                    "Unique Buyers":
+                        buyer_count,
+                    "Avg Net Cost / Purchase":
+                        (
+                            net_spent
+                            / purchase_count
+                            if purchase_count
+                            else 0.0
+                        ),
+                    "Avg Net Cost / Purchase 95% CI":
+                        format_ci(
+                            avg_cost_purchase_ci,
+                            decimals=2,
+                        ),
+                    "Avg Net Spent / Buyer":
+                        (
+                            net_spent
+                            / buyer_count
+                            if buyer_count
+                            else 0.0
+                        ),
+                    "Avg Net Spent / Buyer 95% CI":
+                        format_ci(
+                            avg_spend_buyer_ci,
+                            decimals=2,
+                        ),
+                    "Last 30d Actual Spent":
+                        self.get_actual_last_30d_item_spend(
+                            item_name
+                        ),
+                }
+            )
+
+        rows.sort(
+            key=lambda row: (
+                float(
+                    row[
+                        "Net Spent"
+                    ]
+                ),
+                int(
+                    row[
+                        "Purchases"
+                    ]
+                ),
+            ),
+            reverse=True,
+        )
+
+        self.purchase_item_stats = (
+            rows
+        )
+
+    def get_purchase_item_user_breakdown(
+        self,
+        item_name,
+    ):
+        target_key = purchase_item_key(
+            item_name
+        )
+
+        grouped = defaultdict(
+            list
+        )
+
+        for parsed_item, tx in (
+            self.iter_item_purchase_transactions()
+        ):
+            if (
+                purchase_item_key(
+                    parsed_item
+                )
+                != target_key
+            ):
+                continue
+
+            grouped[
+                str(
+                    tx[
+                        "user_id"
+                    ]
+                )
+            ].append(
+                tx
+            )
+
+        rows = []
+
+        for user_id, txs in grouped.items():
+            net_spent = -sum(
+                float(
+                    tx[
+                        "total"
+                    ]
+                )
+                for tx in txs
+            )
+
+            purchase_count = len(
+                txs
+            )
+
+            rows.append(
+                {
+                    "Username":
+                        self.get_user_label(
+                            user_id
+                        ),
+                    "Net Spent":
+                        net_spent,
+                    "Purchases":
+                        purchase_count,
+                    "Avg Net Cost":
+                        (
+                            net_spent
+                            / purchase_count
+                            if purchase_count
+                            else 0.0
+                        ),
+                    "Last 30d Actual Spent":
+                        self.get_actual_last_30d_item_spend(
+                            item_name,
+                            user_id=user_id,
+                        ),
+                }
+            )
+
+        total_positive_spend = sum(
+            max(
+                0.0,
+                float(
+                    row[
+                        "Net Spent"
+                    ]
+                ),
+            )
+            for row in rows
+        )
+
+        for row in rows:
+            positive_spend = max(
+                0.0,
+                float(
+                    row[
+                        "Net Spent"
+                    ]
+                ),
+            )
+
+            row[
+                "Net Spend Share %"
+            ] = (
+                positive_spend
+                / total_positive_spend
+                * 100.0
+                if total_positive_spend > 0
+                else 0.0
+            )
+
+        rows.sort(
+            key=lambda row: (
+                float(
+                    row[
+                        "Net Spent"
+                    ]
+                ),
+                int(
+                    row[
+                        "Purchases"
+                    ]
+                ),
+            ),
+            reverse=True,
+        )
+
+        return rows
+
     def build_reason_stats(self):
         grouped = defaultdict(list)
 
@@ -4657,6 +6896,48 @@ class EconomyAnalyzer:
                 for tx in txs
             }
 
+            user_count = len(
+                users
+            )
+
+            user_net = defaultdict(
+                float
+            )
+
+            for tx in txs:
+                user_net[
+                    str(
+                        tx[
+                            "user_id"
+                        ]
+                    )
+                ] += float(
+                    tx[
+                        "total"
+                    ]
+                )
+
+            net_per_user_hour_values = [
+                (
+                    value
+                    / hours
+                )
+                for value
+                in user_net.values()
+                if hours > 0
+            ]
+
+            net_per_user_hour_ci = (
+                self.cached_mean_ci(
+                    f"reason:{reason}:net_user_hour",
+                    net_per_user_hour_values,
+                )
+            )
+            net_hour_ci = scale_ci(
+                net_per_user_hour_ci,
+                user_count,
+            )
+
             rows.append(
                 {
                     "Reason": reason,
@@ -4664,8 +6945,29 @@ class EconomyAnalyzer:
                     "Gross Earned": earned,
                     "Gross Lost": lost,
                     "Net / Hour": net / hours,
+                    "Net / Hour 95% CI":
+                        format_ci(
+                            net_hour_ci,
+                            decimals=2,
+                        ),
+                    "Net / User / Hour":
+                        (
+                            net
+                            / user_count
+                            / hours
+                            if (
+                                user_count > 0
+                                and hours > 0
+                            )
+                            else 0.0
+                        ),
+                    "Net / User / Hour 95% CI":
+                        format_ci(
+                            net_per_user_hour_ci,
+                            decimals=2,
+                        ),
                     "Transactions": len(txs),
-                    "Unique Users": len(users),
+                    "Unique Users": user_count,
                 }
             )
 
@@ -6459,6 +8761,83 @@ class EconomyAnalyzer:
             reverse=True,
         )
 
+        if user_rows:
+            user_count = len(
+                user_rows
+            )
+
+            current_mean_ci = bootstrap_mean_ci(
+                [
+                    row[
+                        "24h Current Net"
+                    ]
+                    for row in user_rows
+                ],
+                seed_key=(
+                    "simulator_server_current:"
+                    + repr(
+                        settings
+                    )
+                ),
+            )
+            proposed_mean_ci = bootstrap_mean_ci(
+                [
+                    row[
+                        "24h Proposed Net"
+                    ]
+                    for row in user_rows
+                ],
+                seed_key=(
+                    "simulator_server_proposed:"
+                    + repr(
+                        settings
+                    )
+                ),
+            )
+            change_mean_ci = bootstrap_mean_ci(
+                [
+                    row[
+                        "24h Change"
+                    ]
+                    for row in user_rows
+                ],
+                seed_key=(
+                    "simulator_server_change:"
+                    + repr(
+                        settings
+                    )
+                ),
+            )
+
+            summary[
+                "24h_current_model_net_ci"
+            ] = scale_ci(
+                current_mean_ci,
+                user_count,
+            )
+            summary[
+                "24h_proposed_net_ci"
+            ] = scale_ci(
+                proposed_mean_ci,
+                user_count,
+            )
+            summary[
+                "24h_change_ci"
+            ] = scale_ci(
+                change_mean_ci,
+                user_count,
+            )
+        else:
+            summary[
+                "24h_current_model_net_ci"
+            ] = None
+            summary[
+                "24h_proposed_net_ci"
+            ] = None
+            summary[
+                "24h_change_ci"
+            ] = None
+
         return (
             game_rows,
             user_rows,
@@ -6852,7 +9231,7 @@ class ExplanationCard(
         parent,
         text="",
         min_height=92,
-        title="What this means",
+        title="Plain-English explanation",
     ):
         super().__init__(
             parent,
@@ -7972,10 +10351,80 @@ class ScrollableArea(
             0
         )
 
+    def scroll_to_widget(
+        self,
+        widget,
+        padding=14,
+    ):
+        """Scroll the main page so a child widget is brought into view."""
+        try:
+            self.update_idletasks()
+            self.content.update_idletasks()
+
+            region = self.canvas.bbox(
+                "all"
+            )
+
+            if not region:
+                return
+
+            total_height = max(
+                1,
+                region[3]
+                - region[1],
+            )
+
+            widget_y = (
+                widget.winfo_rooty()
+                - self.content.winfo_rooty()
+                - padding
+            )
+
+            fraction = min(
+                1.0,
+                max(
+                    0.0,
+                    widget_y
+                    / total_height,
+                ),
+            )
+
+            self.canvas.yview_moveto(
+                fraction
+            )
+
+        except Exception:
+            pass
+
 
 class DataTable(
     tk.Frame
 ):
+    """Custom app-native table.
+
+    The old table used ttk.Treeview, which inherits a lot of native widget
+    styling and is difficult to make visually consistent with the rest of the
+    application. This version draws the header, rows, selection, separators,
+    hover state and horizontal scrollbar directly with Tkinter Canvas.
+
+    Existing behavior is preserved:
+    - search
+    - column sorting
+    - 20-row pagination for large tables
+    - no vertical table scrollbar
+    - horizontal scrolling
+    - Ctrl+C
+    - right-click copy cell / row / Discord table
+    - double-click callbacks
+    - CSV export
+    """
+
+    HEADER_HEIGHT = 38
+    ROW_HEIGHT = 35
+    OUTER_PAD = 1
+    CELL_PAD = 13
+    H_SCROLL_HEIGHT = 16
+
     def __init__(
         self,
         parent,
@@ -7992,26 +10441,23 @@ class DataTable(
         self.columns = []
 
         self.sort_reverse = {}
+        self.active_sort_column = None
+        self.active_sort_reverse = False
 
-        # Tables never scroll vertically. Small tables show every row.
-        # Large tables use pages, so the user only ever needs the horizontal
-        # scrollbar inside the table.
         self.page_size = 20
         self.page_index = 0
         self._filter_after_id = None
-        self.natural_column_widths = {}
 
-        # Use the same fonts as the ttk Treeview style so column sizing is
-        # based on the actual rendered text instead of rough character counts.
-        self.body_measure_font = tkfont.Font(
-            family="Segoe UI",
-            size=10,
-        )
-        self.heading_measure_font = tkfont.Font(
-            family="Bahnschrift",
-            size=10,
-            weight="bold",
-        )
+        self.natural_column_widths = {}
+        self.column_widths = {}
+        self.total_table_width = 0
+
+        self.scroll_x = 0.0
+        self._scroll_drag_start_x = None
+        self._scroll_drag_start_offset = 0.0
+
+        self.selected_indices = set()
+        self.hover_local_index = None
 
         self.double_click_callback = (
             double_click_callback
@@ -8020,11 +10466,58 @@ class DataTable(
         self.last_click_x = 0
         self.last_click_y = 0
 
+        self.body_measure_font = tkfont.Font(
+            family="Segoe UI",
+            size=10,
+        )
+        self.heading_measure_font = tkfont.Font(
+            family="Bahnschrift",
+            size=9,
+            weight="bold",
+        )
+
+        self._right_aligned_text_columns = {
+            "Net / Hour 95% CI",
+            "Net / User / Hour 95% CI",
+            "Net / User Hour 95% CI",
+            "Avg Active Hrs / Day 95% CI",
+            "Avg Transactions / Day 95% CI",
+            "Avg Active Days / 30d 95% CI",
+            "Avg 24h Net 95% CI",
+            "Avg 30d Net 95% CI",
+            "Participation % 95% CI",
+            "Avg Plays / Player / Day 95% CI",
+            "Avg Bet 95% CI",
+            "Net / Play 95% CI",
+            "Avg Net / User 95% CI",
+            "Avg 24h Net / Member 95% CI",
+            "Avg 30d Net / Member 95% CI",
+            "Avg Net Cost / Purchase 95% CI",
+            "Avg Net Spent / Buyer 95% CI",
+        }
+
+        self._text_columns = {
+            "Reason",
+            "Original Reason",
+            "Item",
+            "Top Income Source",
+            "Group",
+            "Most Played Game",
+            "Game Mix",
+            "User ID",
+            "Username",
+            "Timestamp",
+            "Hour",
+            "Date",
+            "Statistic",
+            "Value",
+            "Game",
+        }
+
         toolbar = tk.Frame(
             self,
             bg=CARD,
         )
-
         toolbar.pack(
             fill=tk.X,
             pady=(0, 10),
@@ -8035,30 +10528,28 @@ class DataTable(
             text="Search",
             bg=CARD,
             fg=MUTED,
-            font=("Bahnschrift", 9, "bold"),
+            font=(
+                "Bahnschrift",
+                9,
+                "bold",
+            ),
         ).pack(
-            side=tk.LEFT
+            side=tk.LEFT,
         )
 
         self.search_var = (
             tk.StringVar()
         )
 
-        self.search_entry = (
-            RoundedEntry(
-                toolbar,
-                textvariable=(
-                    self.search_var
-                ),
-                width=230,
-            )
+        self.search_entry = RoundedEntry(
+            toolbar,
+            textvariable=self.search_var,
+            width=230,
         )
-
         self.search_entry.pack(
             side=tk.LEFT,
             padx=(8, 8),
         )
-
         self.search_entry.bind_key(
             "<KeyRelease>",
             self.schedule_filter,
@@ -8073,7 +10564,7 @@ class DataTable(
             hover=SECONDARY_HOVER,
             fg=TEXT,
         ).pack(
-            side=tk.LEFT
+            side=tk.LEFT,
         )
 
         self.discord_copy_button = RoundedButton(
@@ -8090,24 +10581,21 @@ class DataTable(
             padx=(10, 0),
         )
 
-        self.count_label = (
-            tk.Label(
-                toolbar,
-                text="",
-                bg=CARD,
-                fg=MUTED,
-                font=(
-                    "Segoe UI",
-                    10,
-                ),
-            )
+        self.count_label = tk.Label(
+            toolbar,
+            text="",
+            bg=CARD,
+            fg=MUTED,
+            font=(
+                "Segoe UI",
+                10,
+            ),
         )
-
         self.count_label.pack(
-            side=tk.RIGHT
+            side=tk.RIGHT,
         )
 
-        RoundedButton(
+        self.next_button = RoundedButton(
             toolbar,
             "Next",
             self.next_page,
@@ -8115,12 +10603,13 @@ class DataTable(
             bg=SECONDARY_BG,
             hover=SECONDARY_HOVER,
             fg=TEXT,
-        ).pack(
+        )
+        self.next_button.pack(
             side=tk.RIGHT,
             padx=(6, 0),
         )
 
-        RoundedButton(
+        self.prev_button = RoundedButton(
             toolbar,
             "Prev",
             self.previous_page,
@@ -8128,102 +10617,121 @@ class DataTable(
             bg=SECONDARY_BG,
             hover=SECONDARY_HOVER,
             fg=TEXT,
-        ).pack(
+        )
+        self.prev_button.pack(
             side=tk.RIGHT,
             padx=(10, 0),
         )
 
-        holder = tk.Frame(
+        self.table_holder = tk.Frame(
             self,
-            bg=CARD,
+            bg=BORDER,
+            highlightthickness=0,
+            bd=0,
         )
-
-        holder.pack(
+        self.table_holder.pack(
             fill=tk.X,
             expand=False,
         )
 
-        holder.rowconfigure(
-            0,
-            weight=0,
-        )
-
-        holder.columnconfigure(
+        self.table_holder.columnconfigure(
             0,
             weight=1,
         )
 
-        self.table_holder = holder
-
-        self.tree = ttk.Treeview(
-            holder,
-            show="headings",
-            selectmode="extended",
-            height=height,
-        )
-
-        x_scroll = ttk.Scrollbar(
-            holder,
-            orient=tk.HORIZONTAL,
-            command=self.tree.xview,
-        )
-
-        self.tree.configure(
-            xscrollcommand=(
-                x_scroll.set
+        self.canvas = tk.Canvas(
+            self.table_holder,
+            bg=CARD,
+            highlightthickness=0,
+            bd=0,
+            height=(
+                self.HEADER_HEIGHT
+                + max(
+                    1,
+                    min(
+                        int(height),
+                        self.page_size,
+                    ),
+                )
+                * self.ROW_HEIGHT
             ),
+            takefocus=True,
         )
-
-        self.tree.grid(
+        self.canvas.grid(
             row=0,
             column=0,
             sticky="ew",
+            padx=self.OUTER_PAD,
+            pady=(self.OUTER_PAD, 0),
         )
 
-        x_scroll.grid(
+        # A second Canvas is used for the horizontal scrollbar so it matches
+        # the table and app instead of using a native Windows scrollbar.
+        self.h_scroll = tk.Canvas(
+            self.table_holder,
+            bg=CARD,
+            highlightthickness=0,
+            bd=0,
+            height=self.H_SCROLL_HEIGHT,
+            cursor="hand2",
+        )
+        self.h_scroll.grid(
             row=1,
             column=0,
             sticky="ew",
+            padx=self.OUTER_PAD,
+            pady=(0, self.OUTER_PAD),
         )
 
-        # Re-fit columns whenever the table area changes width. If all natural
-        # content fits, the columns expand to use the full width instead of
-        # leaving a large empty block on the right. If they do not fit, the
-        # horizontal scrollbar is used.
-        holder.bind(
+        self.canvas.bind(
             "<Configure>",
             self.fit_columns_to_viewport,
             add="+",
         )
-
-        self.tree.tag_configure(
-            "even",
-            background=CARD,
+        self.canvas.bind(
+            "<Button-1>",
+            self.handle_click,
         )
-
-        self.tree.tag_configure(
-            "odd",
-            background=TABLE_ALT,
-        )
-
-        self.tree.bind(
-            "<Control-c>",
-            self.copy_selected,
-        )
-
-        self.tree.bind(
-            "<Control-C>",
-            self.copy_selected,
-        )
-
-        self.tree.bind(
+        self.canvas.bind(
             "<Double-1>",
             self.handle_double_click,
         )
-
-        self.tree.bind(
+        self.canvas.bind(
             "<Button-3>",
             self.show_menu,
+        )
+        self.canvas.bind(
+            "<Motion>",
+            self.handle_motion,
+        )
+        self.canvas.bind(
+            "<Leave>",
+            self.handle_leave,
+        )
+        self.canvas.bind(
+            "<Control-c>",
+            self.copy_selected,
+        )
+        self.canvas.bind(
+            "<Control-C>",
+            self.copy_selected,
+        )
+        self.canvas.bind(
+            "<Shift-MouseWheel>",
+            self.handle_horizontal_wheel,
+        )
+
+        self.h_scroll.bind(
+            "<Button-1>",
+            self.start_scroll_drag,
+        )
+        self.h_scroll.bind(
+            "<B1-Motion>",
+            self.drag_scroll,
+        )
+        self.h_scroll.bind(
+            "<ButtonRelease-1>",
+            self.end_scroll_drag,
         )
 
         self.menu = tk.Menu(
@@ -8236,133 +10744,40 @@ class DataTable(
             relief=tk.FLAT,
             bd=1,
         )
-
         self.menu.add_command(
             label="Copy cell",
             command=self.copy_cell,
         )
-
         self.menu.add_command(
             label="Copy row",
             command=self.copy_selected,
         )
-
         self.menu.add_separator()
-
         self.menu.add_command(
             label="Copy current page for Discord",
             command=self.copy_discord_page,
         )
 
+        self.number_guide_card = ExplanationCard(
+            self,
+            title="Every number explained",
+            text=(
+                "Load data and this section will explain every value shown in this table."
+            ),
+            min_height=92,
+        )
+        self.number_guide_card.pack(
+            fill=tk.X,
+            pady=(10, 0),
+        )
+
+        self.redraw()
+
     def clear_search(self):
         self.search_var.set(
             ""
         )
-
         self.apply_filter()
-
-    def set_data(
-        self,
-        data,
-    ):
-        self.data = list(
-            data
-        )
-
-        self.filtered_data = list(
-            data
-        )
-        self.page_index = 0
-
-        self.tree.delete(
-            *self.tree.get_children()
-        )
-
-        if not data:
-            self.columns = []
-
-            self.tree[
-                "columns"
-            ] = []
-
-            self.count_label.config(
-                text="0 rows"
-            )
-            self.tree.configure(
-                height=1
-            )
-            self.after_idle(
-                self.fit_parent_panel_to_content
-            )
-
-            return
-
-        self.columns = list(
-            data[0].keys()
-        )
-
-        self.tree[
-            "columns"
-        ] = self.columns
-
-        text_columns = {
-            "Reason",
-            "Original Reason",
-            "Top Income Source",
-            "Group",
-            "Most Played Game",
-            "Game Mix",
-            "User ID",
-            "Username",
-            "Timestamp",
-            "First Seen",
-            "Last Seen",
-            "Hour",
-            "Date",
-            "Statistic",
-            "Value",
-            "Game",
-        }
-
-        for column in (
-            self.columns
-        ):
-            self.tree.heading(
-                column,
-                text=column,
-                command=lambda c=column:
-                self.sort_by(c),
-            )
-
-            width = self.calculate_column_width(
-                column
-            )
-            self.natural_column_widths[
-                column
-            ] = width
-
-            self.tree.column(
-                column,
-                width=width,
-                minwidth=max(
-                    85,
-                    self.heading_measure_font.measure(
-                        str(column)
-                    ) + 24,
-                ),
-                stretch=False,
-                anchor=(
-                    tk.W
-                    if column
-                    in text_columns
-                    else tk.E
-                ),
-            )
-
-        self.after_idle(
-            self.fit_columns_to_viewport
-        )
-        self.refresh()
 
     def display_value(
         self,
@@ -8390,16 +10805,11 @@ class DataTable(
         self,
         column,
     ):
-        """Return the exact content-driven width for a table column.
-
-        There is deliberately no small hard maximum. Long content is allowed
-        to make the table wider because every table has a horizontal scrollbar.
-        """
         heading_width = (
             self.heading_measure_font.measure(
                 str(column)
             )
-            + 36
+            + 38
         )
 
         max_cell_width = 0
@@ -8416,13 +10826,15 @@ class DataTable(
                 self.body_measure_font.measure(
                     value
                 )
-                + 32
+                + self.CELL_PAD * 2
             )
 
-            if measured > max_cell_width:
-                max_cell_width = measured
+            max_cell_width = max(
+                max_cell_width,
+                measured,
+            )
 
-        return int(
+        width = int(
             max(
                 96,
                 heading_width,
@@ -8430,24 +10842,121 @@ class DataTable(
             )
         )
 
+        # Keep long prose fields visually manageable. The full value remains
+        # available through copy/export; only the on-screen cell is ellipsized.
+        preferred_max = {
+            "Original Reason": 420,
+            "Value": 360,
+            "Statistic": 300,
+            "Username": 260,
+            "User ID": 220,
+            "Top Income Source": 220,
+            "Reason": 220,
+            "Item": 260,
+            "Game Mix": 320,
+        }.get(
+            column
+        )
+
+        if preferred_max is not None:
+            width = min(
+                width,
+                preferred_max,
+            )
+
+        return width
+
+    def set_data(
+        self,
+        data,
+    ):
+        self.data = list(
+            data
+        )
+        self.filtered_data = list(
+            data
+        )
+        self.page_index = 0
+        self.selected_indices.clear()
+        self.hover_local_index = None
+        self.scroll_x = 0.0
+
+        if not self.data:
+            self.columns = []
+            self.natural_column_widths = {}
+            self.column_widths = {}
+            self.total_table_width = 0
+            self.count_label.config(
+                text="0 rows"
+            )
+            self.auto_fit_height(
+                0
+            )
+            self.update_number_guide()
+            self.redraw()
+            return
+
+        self.columns = list(
+            self.data[0].keys()
+        )
+
+        self.natural_column_widths = {
+            column:
+                self.calculate_column_width(
+                    column
+                )
+            for column in self.columns
+        }
+
+        self.column_widths = dict(
+            self.natural_column_widths
+        )
+
+        self.after_idle(
+            self.fit_columns_to_viewport
+        )
+        self.update_number_guide()
+        self.refresh()
+
+    def update_number_guide(
+        self,
+    ):
+        try:
+            self.number_guide_card.set_text(
+                build_table_number_guide(
+                    self.columns,
+                    self.data,
+                )
+            )
+
+            self.after_idle(
+                self.fit_parent_panel_to_content
+            )
+            self.after(
+                80,
+                self.fit_parent_panel_to_content,
+            )
+
+        except Exception:
+            pass
+
     def fit_columns_to_viewport(
         self,
         event=None,
     ):
-        """Fill spare horizontal space, otherwise preserve natural widths."""
         if not self.columns:
+            self.redraw()
             return
 
         try:
             available = (
                 event.width
                 if event is not None
-                else self.table_holder.winfo_width()
+                else self.canvas.winfo_width()
             )
-
             available = max(
                 1,
-                int(available) - 4,
+                int(available),
             )
 
             natural = [
@@ -8457,7 +10966,8 @@ class DataTable(
                         100,
                     )
                 )
-                for column in self.columns
+                for column
+                in self.columns
             ]
 
             total_natural = sum(
@@ -8471,44 +10981,121 @@ class DataTable(
                     available
                     - total_natural
                 )
-                base_extra = (
-                    extra
-                    // len(self.columns)
-                )
-                remainder = (
-                    extra
-                    % len(self.columns)
-                )
 
-                widths = [
-                    width
-                    + base_extra
-                    + (
-                        1
-                        if index < remainder
-                        else 0
-                    )
-                    for index, width
-                    in enumerate(natural)
+                # Give text columns a little more of the free space so the
+                # table feels less mechanically uniform.
+                weights = [
+                    1.35
+                    if column
+                    in self._text_columns
+                    else 1.0
+                    for column
+                    in self.columns
                 ]
-
-            for column, width in zip(
-                self.columns,
-                widths,
-            ):
-                self.tree.column(
-                    column,
-                    width=int(width),
+                weight_total = sum(
+                    weights
                 )
+
+                widths = []
+                used = 0
+
+                for index, (
+                    width,
+                    weight,
+                ) in enumerate(
+                    zip(
+                        natural,
+                        weights,
+                    )
+                ):
+                    if (
+                        index
+                        == len(natural) - 1
+                    ):
+                        addition = (
+                            extra - used
+                        )
+                    else:
+                        addition = int(
+                            extra
+                            * weight
+                            / weight_total
+                        )
+                        used += addition
+
+                    widths.append(
+                        width
+                        + max(
+                            0,
+                            addition,
+                        )
+                    )
+
+            self.column_widths = {
+                column:
+                    int(width)
+                for column, width
+                in zip(
+                    self.columns,
+                    widths,
+                )
+            }
+
+            self.total_table_width = sum(
+                self.column_widths.values()
+            )
+
+            self.clamp_scroll()
+            self.redraw()
 
         except Exception:
             pass
 
-    def refresh(self):
-        self.tree.delete(
-            *self.tree.get_children()
+    def clamp_scroll(self):
+        viewport = max(
+            1,
+            self.canvas.winfo_width(),
+        )
+        max_scroll = max(
+            0.0,
+            float(
+                self.total_table_width
+                - viewport
+            ),
+        )
+        self.scroll_x = min(
+            max(
+                0.0,
+                self.scroll_x,
+            ),
+            max_scroll,
         )
 
+    def get_current_page_rows(
+        self,
+    ):
+        total_rows = len(
+            self.filtered_data
+        )
+
+        start = (
+            self.page_index
+            * self.page_size
+        )
+        end = min(
+            total_rows,
+            start + self.page_size,
+        )
+
+        return (
+            start,
+            end,
+            self.filtered_data[
+                start:end
+            ],
+        )
+
+    def refresh(self):
         total_rows = len(
             self.filtered_data
         )
@@ -8521,63 +11108,26 @@ class DataTable(
             if total_rows
             else 0,
         )
+
         self.page_index = min(
             self.page_index,
             max_page,
         )
 
-        start = (
-            self.page_index
-            * self.page_size
-        )
-        end = min(
-            total_rows,
-            start + self.page_size,
+        start, end, rows = (
+            self.get_current_page_rows()
         )
 
-        visible_rows = self.filtered_data[
-            start:end
-        ]
-
-        for (
-            local_index,
-            row,
-        ) in enumerate(
-            visible_rows
-        ):
-            values = []
-
-            for column in (
-                self.columns
-            ):
-                value = row.get(
-                    column,
-                    "",
-                )
-
-                value = self.display_value(
-                    value
-                )
-
-                values.append(
-                    value
-                )
-
-            absolute_index = (
+        self.selected_indices = {
+            index
+            for index
+            in self.selected_indices
+            if (
                 start
-                + local_index
+                <= index
+                < end
             )
-
-            self.tree.insert(
-                "",
-                tk.END,
-                values=values,
-                tags=(
-                    "even"
-                    if absolute_index % 2 == 0
-                    else "odd",
-                ),
-            )
+        }
 
         if total_rows:
             self.count_label.config(
@@ -8592,21 +11142,29 @@ class DataTable(
             )
 
         self.auto_fit_height(
-            len(visible_rows)
+            len(rows)
         )
+        self.redraw()
 
     def auto_fit_height(
         self,
         visible_row_count,
     ):
-        """Show every row on the current page with no vertical table scroll."""
         desired_rows = max(
             1,
-            int(visible_row_count),
+            int(
+                visible_row_count
+            ),
         )
 
-        self.tree.configure(
-            height=desired_rows
+        desired_height = (
+            self.HEADER_HEIGHT
+            + desired_rows
+            * self.ROW_HEIGHT
+        )
+
+        self.canvas.configure(
+            height=desired_height
         )
 
         self.after_idle(
@@ -8614,6 +11172,10 @@ class DataTable(
         )
         self.after(
             60,
+            self.fit_parent_panel_to_content,
+        )
+        self.after(
+            140,
             self.fit_parent_panel_to_content,
         )
 
@@ -8676,11 +11238,967 @@ class DataTable(
         except Exception:
             pass
 
+    def _column_at_x(
+        self,
+        x,
+    ):
+        content_x = (
+            float(x)
+            + self.scroll_x
+        )
+        cursor = 0.0
+
+        for index, column in enumerate(
+            self.columns
+        ):
+            width = float(
+                self.column_widths.get(
+                    column,
+                    100,
+                )
+            )
+
+            if (
+                cursor
+                <= content_x
+                < cursor + width
+            ):
+                return (
+                    index,
+                    column,
+                    cursor,
+                    width,
+                )
+
+            cursor += width
+
+        return (
+            None,
+            None,
+            None,
+            None,
+        )
+
+    def _local_row_at_y(
+        self,
+        y,
+    ):
+        if y < self.HEADER_HEIGHT:
+            return None
+
+        local_index = int(
+            (
+                y
+                - self.HEADER_HEIGHT
+            )
+            // self.ROW_HEIGHT
+        )
+
+        _, _, rows = (
+            self.get_current_page_rows()
+        )
+
+        if (
+            0
+            <= local_index
+            < len(rows)
+        ):
+            return local_index
+
+        return None
+
+    def _absolute_index(
+        self,
+        local_index,
+    ):
+        return (
+            self.page_index
+            * self.page_size
+            + local_index
+        )
+
+    def _display_row(
+        self,
+        absolute_index,
+    ):
+        if (
+            0
+            <= absolute_index
+            < len(
+                self.filtered_data
+            )
+        ):
+            return self.filtered_data[
+                absolute_index
+            ]
+
+        return None
+
+    def _fit_cell_text(
+        self,
+        text,
+        max_width,
+        font,
+    ):
+        text = str(
+            text
+        )
+
+        if (
+            max_width <= 8
+            or font.measure(
+                text
+            ) <= max_width
+        ):
+            return text
+
+        ellipsis = "…"
+        ellipsis_width = font.measure(
+            ellipsis
+        )
+
+        if ellipsis_width >= max_width:
+            return ""
+
+        low = 0
+        high = len(
+            text
+        )
+
+        while low < high:
+            mid = (
+                low + high + 1
+            ) // 2
+
+            candidate = (
+                text[:mid]
+                + ellipsis
+            )
+
+            if font.measure(
+                candidate
+            ) <= max_width:
+                low = mid
+            else:
+                high = mid - 1
+
+        return (
+            text[:low]
+            + ellipsis
+        )
+
+    def redraw(self):
+        canvas = self.canvas
+        canvas.delete(
+            "all"
+        )
+
+        width = max(
+            1,
+            canvas.winfo_width(),
+        )
+        height = max(
+            1,
+            canvas.winfo_height(),
+        )
+
+        canvas.create_rectangle(
+            0,
+            0,
+            width,
+            height,
+            fill=CARD,
+            outline="",
+        )
+
+        # Header surface.
+        canvas.create_rectangle(
+            0,
+            0,
+            width,
+            self.HEADER_HEIGHT,
+            fill=SECONDARY_BG,
+            outline="",
+        )
+
+        # Small accent line gives the table a custom application identity
+        # without making the whole header bright purple.
+        canvas.create_rectangle(
+            0,
+            0,
+            width,
+            2,
+            fill=PRIMARY,
+            outline="",
+        )
+
+        if not self.columns:
+            canvas.create_text(
+                16,
+                self.HEADER_HEIGHT + 18,
+                text="No rows to display",
+                anchor="w",
+                fill=MUTED,
+                font=self.body_measure_font,
+            )
+            self.draw_horizontal_scrollbar()
+            return
+
+        x = -self.scroll_x
+
+        # Header cells.
+        for column in self.columns:
+            column_width = float(
+                self.column_widths.get(
+                    column,
+                    100,
+                )
+            )
+
+            if (
+                x + column_width >= 0
+                and x <= width
+            ):
+                is_text = (
+                    column
+                    in self._text_columns
+                )
+
+                heading = str(
+                    column
+                )
+
+                if (
+                    self.active_sort_column
+                    == column
+                ):
+                    heading += (
+                        "  ↓"
+                        if self.active_sort_reverse
+                        else "  ↑"
+                    )
+
+                heading = self._fit_cell_text(
+                    heading,
+                    max(
+                        1,
+                        column_width
+                        - self.CELL_PAD * 2,
+                    ),
+                    self.heading_measure_font,
+                )
+
+                canvas.create_text(
+                    (
+                        x
+                        + self.CELL_PAD
+                        if is_text
+                        else x
+                        + column_width
+                        - self.CELL_PAD
+                    ),
+                    self.HEADER_HEIGHT / 2 + 1,
+                    text=heading,
+                    anchor=(
+                        "w"
+                        if is_text
+                        else "e"
+                    ),
+                    fill=TEXT,
+                    font=self.heading_measure_font,
+                )
+
+                # Very subtle column separators.
+                canvas.create_line(
+                    x + column_width,
+                    8,
+                    x + column_width,
+                    self.HEADER_HEIGHT - 8,
+                    fill=BORDER,
+                    width=1,
+                )
+
+            x += column_width
+
+        canvas.create_line(
+            0,
+            self.HEADER_HEIGHT,
+            width,
+            self.HEADER_HEIGHT,
+            fill=BORDER,
+            width=1,
+        )
+
+        start, _, rows = (
+            self.get_current_page_rows()
+        )
+
+        for local_index, row in enumerate(
+            rows
+        ):
+            absolute_index = (
+                start
+                + local_index
+            )
+
+            y1 = (
+                self.HEADER_HEIGHT
+                + local_index
+                * self.ROW_HEIGHT
+            )
+            y2 = (
+                y1
+                + self.ROW_HEIGHT
+            )
+
+            if (
+                absolute_index
+                in self.selected_indices
+            ):
+                row_fill = SOFT_BLUE
+            elif (
+                local_index
+                == self.hover_local_index
+            ):
+                row_fill = SIDEBAR_HOVER
+            elif (
+                absolute_index
+                % 2
+                == 0
+            ):
+                row_fill = CARD
+            else:
+                row_fill = TABLE_ALT
+
+            canvas.create_rectangle(
+                0,
+                y1,
+                width,
+                y2,
+                fill=row_fill,
+                outline="",
+            )
+
+            # Thin selection marker is easier to read than turning the entire
+            # row into a saturated selection color.
+            if (
+                absolute_index
+                in self.selected_indices
+            ):
+                canvas.create_rectangle(
+                    0,
+                    y1,
+                    3,
+                    y2,
+                    fill=PRIMARY,
+                    outline="",
+                )
+
+            x = -self.scroll_x
+
+            for column in self.columns:
+                column_width = float(
+                    self.column_widths.get(
+                        column,
+                        100,
+                    )
+                )
+
+                if (
+                    x + column_width >= 0
+                    and x <= width
+                ):
+                    raw_value = row.get(
+                        column,
+                        "",
+                    )
+                    value = self.display_value(
+                        raw_value
+                    )
+
+                    is_text = (
+                        column
+                        in self._text_columns
+                        or (
+                            not isinstance(
+                                raw_value,
+                                (
+                                    int,
+                                    float,
+                                ),
+                            )
+                            and column
+                            not in self._right_aligned_text_columns
+                        )
+                    )
+
+                    shown = self._fit_cell_text(
+                        value,
+                        max(
+                            1,
+                            column_width
+                            - self.CELL_PAD * 2,
+                        ),
+                        self.body_measure_font,
+                    )
+
+                    canvas.create_text(
+                        (
+                            x
+                            + self.CELL_PAD
+                            if is_text
+                            else x
+                            + column_width
+                            - self.CELL_PAD
+                        ),
+                        (
+                            y1
+                            + self.ROW_HEIGHT / 2
+                        ),
+                        text=shown,
+                        anchor=(
+                            "w"
+                            if is_text
+                            else "e"
+                        ),
+                        fill=TEXT,
+                        font=self.body_measure_font,
+                    )
+
+                x += column_width
+
+            canvas.create_line(
+                0,
+                y2,
+                width,
+                y2,
+                fill=BORDER,
+                width=1,
+            )
+
+        # Outer edge.
+        canvas.create_rectangle(
+            0,
+            0,
+            width - 1,
+            height - 1,
+            outline=BORDER,
+            width=1,
+        )
+
+        self.draw_horizontal_scrollbar()
+
+    def draw_horizontal_scrollbar(self):
+        bar = self.h_scroll
+        bar.delete(
+            "all"
+        )
+
+        viewport = max(
+            1,
+            self.canvas.winfo_width(),
+        )
+
+        if (
+            not self.columns
+            or self.total_table_width
+            <= viewport + 1
+        ):
+            self.scroll_x = 0.0
+            bar.configure(
+                height=8
+            )
+            bar.create_line(
+                0,
+                4,
+                max(
+                    1,
+                    bar.winfo_width(),
+                ),
+                4,
+                fill=CARD,
+                width=1,
+            )
+            return
+
+        bar.configure(
+            height=self.H_SCROLL_HEIGHT
+        )
+
+        width = max(
+            1,
+            bar.winfo_width(),
+        )
+
+        track_left = 8
+        track_right = max(
+            track_left + 1,
+            width - 8,
+        )
+        track_width = max(
+            1,
+            track_right - track_left,
+        )
+
+        max_scroll = max(
+            1.0,
+            float(
+                self.total_table_width
+                - viewport
+            ),
+        )
+
+        thumb_width = max(
+            42.0,
+            track_width
+            * min(
+                1.0,
+                viewport
+                / max(
+                    1.0,
+                    float(
+                        self.total_table_width
+                    ),
+                ),
+            ),
+        )
+
+        travel = max(
+            1.0,
+            track_width
+            - thumb_width,
+        )
+
+        thumb_left = (
+            track_left
+            + travel
+            * (
+                self.scroll_x
+                / max_scroll
+            )
+        )
+        thumb_right = (
+            thumb_left
+            + thumb_width
+        )
+
+        y = (
+            self.H_SCROLL_HEIGHT
+            / 2
+        )
+
+        bar.create_line(
+            track_left,
+            y,
+            track_right,
+            y,
+            fill=DEEP_BG,
+            width=5,
+            capstyle=tk.ROUND,
+        )
+
+        bar.create_line(
+            thumb_left,
+            y,
+            thumb_right,
+            y,
+            fill=MUTED,
+            width=6,
+            capstyle=tk.ROUND,
+            tags=("thumb",),
+        )
+
+    def start_scroll_drag(
+        self,
+        event,
+    ):
+        viewport = max(
+            1,
+            self.canvas.winfo_width(),
+        )
+
+        if (
+            self.total_table_width
+            <= viewport
+        ):
+            return
+
+        self._scroll_drag_start_x = (
+            event.x
+        )
+        self._scroll_drag_start_offset = (
+            self.scroll_x
+        )
+
+        width = max(
+            1,
+            self.h_scroll.winfo_width(),
+        )
+        track_width = max(
+            1.0,
+            width - 16.0,
+        )
+
+        thumb_width = max(
+            42.0,
+            track_width
+            * min(
+                1.0,
+                viewport
+                / max(
+                    1.0,
+                    float(
+                        self.total_table_width
+                    ),
+                ),
+            ),
+        )
+
+        travel = max(
+            1.0,
+            track_width
+            - thumb_width,
+        )
+        max_scroll = max(
+            1.0,
+            float(
+                self.total_table_width
+                - viewport
+            ),
+        )
+
+        current_thumb_left = (
+            8.0
+            + travel
+            * self.scroll_x
+            / max_scroll
+        )
+        current_thumb_right = (
+            current_thumb_left
+            + thumb_width
+        )
+
+        if not (
+            current_thumb_left
+            <= event.x
+            <= current_thumb_right
+        ):
+            target_ratio = min(
+                1.0,
+                max(
+                    0.0,
+                    (
+                        event.x
+                        - 8.0
+                        - thumb_width / 2
+                    )
+                    / travel,
+                ),
+            )
+
+            self.scroll_x = (
+                target_ratio
+                * max_scroll
+            )
+            self._scroll_drag_start_x = (
+                event.x
+            )
+            self._scroll_drag_start_offset = (
+                self.scroll_x
+            )
+            self.redraw()
+
+    def drag_scroll(
+        self,
+        event,
+    ):
+        if (
+            self._scroll_drag_start_x
+            is None
+        ):
+            return
+
+        viewport = max(
+            1,
+            self.canvas.winfo_width(),
+        )
+        width = max(
+            1,
+            self.h_scroll.winfo_width(),
+        )
+        track_width = max(
+            1.0,
+            width - 16.0,
+        )
+
+        thumb_width = max(
+            42.0,
+            track_width
+            * min(
+                1.0,
+                viewport
+                / max(
+                    1.0,
+                    float(
+                        self.total_table_width
+                    ),
+                ),
+            ),
+        )
+
+        travel = max(
+            1.0,
+            track_width
+            - thumb_width,
+        )
+        max_scroll = max(
+            0.0,
+            float(
+                self.total_table_width
+                - viewport
+            ),
+        )
+
+        delta_pixels = (
+            event.x
+            - self._scroll_drag_start_x
+        )
+
+        self.scroll_x = (
+            self._scroll_drag_start_offset
+            + (
+                delta_pixels
+                / travel
+                * max_scroll
+            )
+        )
+        self.clamp_scroll()
+        self.redraw()
+
+    def end_scroll_drag(
+        self,
+        event=None,
+    ):
+        self._scroll_drag_start_x = None
+
+    def handle_horizontal_wheel(
+        self,
+        event,
+    ):
+        direction = (
+            -1
+            if event.delta > 0
+            else 1
+        )
+
+        self.scroll_x += (
+            direction
+            * 80
+        )
+        self.clamp_scroll()
+        self.redraw()
+
+        return "break"
+
+    def handle_motion(
+        self,
+        event,
+    ):
+        local_index = (
+            self._local_row_at_y(
+                event.y
+            )
+        )
+
+        if (
+            local_index
+            != self.hover_local_index
+        ):
+            self.hover_local_index = (
+                local_index
+            )
+            self.redraw()
+
+        if event.y < self.HEADER_HEIGHT:
+            self.canvas.configure(
+                cursor="hand2"
+            )
+        else:
+            self.canvas.configure(
+                cursor="arrow"
+            )
+
+    def handle_leave(
+        self,
+        event=None,
+    ):
+        if self.hover_local_index is not None:
+            self.hover_local_index = None
+            self.redraw()
+
+    def handle_click(
+        self,
+        event,
+    ):
+        self.canvas.focus_set()
+
+        if event.y < self.HEADER_HEIGHT:
+            _, column, _, _ = (
+                self._column_at_x(
+                    event.x
+                )
+            )
+
+            if column:
+                self.sort_by(
+                    column
+                )
+
+            return
+
+        local_index = (
+            self._local_row_at_y(
+                event.y
+            )
+        )
+
+        if local_index is None:
+            self.selected_indices.clear()
+            self.redraw()
+            return
+
+        absolute_index = (
+            self._absolute_index(
+                local_index
+            )
+        )
+
+        ctrl_pressed = bool(
+            event.state & 0x0004
+        )
+
+        if ctrl_pressed:
+            if (
+                absolute_index
+                in self.selected_indices
+            ):
+                self.selected_indices.remove(
+                    absolute_index
+                )
+            else:
+                self.selected_indices.add(
+                    absolute_index
+                )
+        else:
+            self.selected_indices = {
+                absolute_index
+            }
+
+        self.redraw()
+
+    def get_selected_row(self):
+        if not self.selected_indices:
+            return None
+
+        index = min(
+            self.selected_indices
+        )
+
+        row = self._display_row(
+            index
+        )
+
+        if row is None:
+            return None
+
+        return dict(
+            row
+        )
+
+    def handle_double_click(
+        self,
+        event,
+    ):
+        if event.y < self.HEADER_HEIGHT:
+            return
+
+        local_index = (
+            self._local_row_at_y(
+                event.y
+            )
+        )
+
+        if local_index is None:
+            return
+
+        absolute_index = (
+            self._absolute_index(
+                local_index
+            )
+        )
+        self.selected_indices = {
+            absolute_index
+        }
+        self.redraw()
+
+        if self.double_click_callback:
+            row = self.get_selected_row()
+
+            if row:
+                self.double_click_callback(
+                    row
+                )
+            return
+
+        self._copy_clicked_cell(
+            event.x,
+            event.y,
+        )
+
+    def show_menu(
+        self,
+        event,
+    ):
+        self.last_click_x = (
+            event.x
+        )
+        self.last_click_y = (
+            event.y
+        )
+
+        local_index = (
+            self._local_row_at_y(
+                event.y
+            )
+        )
+
+        if local_index is not None:
+            absolute_index = (
+                self._absolute_index(
+                    local_index
+                )
+            )
+            self.selected_indices = {
+                absolute_index
+            }
+            self.redraw()
+
+        try:
+            self.menu.tk_popup(
+                event.x_root,
+                event.y_root,
+            )
+        finally:
+            self.menu.grab_release()
+
     def schedule_filter(
         self,
         event=None,
     ):
-        if self._filter_after_id is not None:
+        if (
+            self._filter_after_id
+            is not None
+        ):
             try:
                 self.after_cancel(
                     self._filter_after_id
@@ -8688,9 +12206,11 @@ class DataTable(
             except Exception:
                 pass
 
-        self._filter_after_id = self.after(
-            250,
-            self.apply_filter,
+        self._filter_after_id = (
+            self.after(
+                250,
+                self.apply_filter,
+            )
         )
 
     def previous_page(
@@ -8698,6 +12218,8 @@ class DataTable(
     ):
         if self.page_index > 0:
             self.page_index -= 1
+            self.selected_indices.clear()
+            self.hover_local_index = None
             self.refresh()
 
     def next_page(
@@ -8706,9 +12228,13 @@ class DataTable(
         if (
             (self.page_index + 1)
             * self.page_size
-            < len(self.filtered_data)
+            < len(
+                self.filtered_data
+            )
         ):
             self.page_index += 1
+            self.selected_indices.clear()
+            self.hover_local_index = None
             self.refresh()
 
     def apply_filter(
@@ -8717,24 +12243,26 @@ class DataTable(
     ):
         self._filter_after_id = None
         self.page_index = 0
+        self.selected_indices.clear()
+        self.hover_local_index = None
 
-        text = (
+        search_text = (
             self.search_var
             .get()
             .lower()
             .strip()
         )
 
-        if not text:
+        if not search_text:
             self.filtered_data = list(
                 self.data
             )
-
         else:
             self.filtered_data = [
                 row
                 for row in self.data
-                if text in " ".join(
+                if search_text
+                in " ".join(
                     str(value).lower()
                     for value
                     in row.values()
@@ -8748,14 +12276,15 @@ class DataTable(
         column,
     ):
         reverse = (
-            self.sort_reverse
-            .get(
+            self.sort_reverse.get(
                 column,
                 False,
             )
         )
 
-        def key(row):
+        def key(
+            row,
+        ):
             value = row.get(
                 column
             )
@@ -8778,6 +12307,24 @@ class DataTable(
                     value,
                 )
 
+            if column.endswith(
+                "95% CI"
+            ):
+                midpoint = parse_ci_midpoint(
+                    value
+                )
+
+                if midpoint is not None:
+                    return (
+                        0,
+                        midpoint,
+                    )
+
+                return (
+                    2,
+                    "",
+                )
+
             return (
                 1,
                 str(
@@ -8790,103 +12337,21 @@ class DataTable(
             reverse=reverse,
         )
 
+        self.active_sort_column = (
+            column
+        )
+        self.active_sort_reverse = (
+            reverse
+        )
+
         self.sort_reverse[
             column
         ] = not reverse
 
         self.page_index = 0
+        self.selected_indices.clear()
+        self.hover_local_index = None
         self.refresh()
-
-    def get_selected_row(self):
-        selected = (
-            self.tree.selection()
-        )
-
-        if not selected:
-            return None
-
-        values = (
-            self.tree.item(
-                selected[0],
-                "values",
-            )
-        )
-
-        if not values:
-            return None
-
-        return dict(
-            zip(
-                self.columns,
-                values,
-            )
-        )
-
-    def handle_double_click(
-        self,
-        event,
-    ):
-        item = (
-            self.tree.identify_row(
-                event.y
-            )
-        )
-
-        if item:
-            self.tree.selection_set(
-                item
-            )
-
-        if (
-            self.double_click_callback
-        ):
-            row = (
-                self.get_selected_row()
-            )
-
-            if row:
-                self.double_click_callback(
-                    row
-                )
-
-            return
-
-        self._copy_clicked_cell(
-            event.x,
-            event.y,
-        )
-
-    def show_menu(
-        self,
-        event,
-    ):
-        self.last_click_x = (
-            event.x
-        )
-
-        self.last_click_y = (
-            event.y
-        )
-
-        item = (
-            self.tree.identify_row(
-                event.y
-            )
-        )
-
-        if item:
-            self.tree.selection_set(
-                item
-            )
-
-        try:
-            self.menu.tk_popup(
-                event.x_root,
-                event.y_root,
-            )
-
-        finally:
-            self.menu.grab_release()
 
     def infer_discord_title(
         self,
@@ -8901,6 +12366,27 @@ class DataTable(
             "Unique Users",
         }.issubset(columns):
             return "Income Sources"
+
+        if {
+            "Username",
+            "Net Earned",
+            "Net Earnings Share %",
+        }.issubset(columns):
+            return "Income Source Users"
+
+        if {
+            "Item",
+            "Net Spent",
+            "Unique Buyers",
+        }.issubset(columns):
+            return "Purchases"
+
+        if {
+            "Username",
+            "Net Spent",
+            "Net Spend Share %",
+        }.issubset(columns):
+            return "Item Buyers"
 
         if {
             "Group",
@@ -8930,17 +12416,22 @@ class DataTable(
                 columns
             )
             and (
-                "Username" in columns
-                or "User ID" in columns
+                "Username"
+                in columns
+                or "User ID"
+                in columns
             )
         ):
             return "Transactions"
 
         if (
-            "30d Net" in columns
+            "30d Net"
+            in columns
             and (
-                "Username" in columns
-                or "User ID" in columns
+                "Username"
+                in columns
+                or "User ID"
+                in columns
             )
         ):
             return "Users"
@@ -8958,31 +12449,6 @@ class DataTable(
             return "Daily Results"
 
         return "Economy Analytics"
-
-    def get_current_page_rows(
-        self,
-    ):
-        total_rows = len(
-            self.filtered_data
-        )
-
-        start = (
-            self.page_index
-            * self.page_size
-        )
-
-        end = min(
-            total_rows,
-            start + self.page_size,
-        )
-
-        return (
-            start,
-            end,
-            self.filtered_data[
-                start:end
-            ],
-        )
 
     def build_discord_table(
         self,
@@ -9005,7 +12471,8 @@ class DataTable(
                 column,
                 column,
             )
-            for column in self.columns
+            for column
+            in self.columns
         ]
 
         cell_rows = []
@@ -9058,26 +12525,36 @@ class DataTable(
                     column_name,
                     "",
                 )
-                for row in rows
+                for row
+                in rows
             ]
 
             nonempty = [
                 raw
-                for raw in raw_values
+                for raw
+                in raw_values
                 if raw != ""
             ]
 
             numeric_columns.append(
-                bool(nonempty)
-                and all(
-                    isinstance(
-                        raw,
-                        (
-                            int,
-                            float,
-                        ),
+                (
+                    bool(
+                        nonempty
                     )
-                    for raw in nonempty
+                    and all(
+                        isinstance(
+                            raw,
+                            (
+                                int,
+                                float,
+                            ),
+                        )
+                        for raw
+                        in nonempty
+                    )
+                )
+                or column_name.endswith(
+                    "95% CI"
                 )
             )
 
@@ -9098,13 +12575,17 @@ class DataTable(
                 ]:
                     parts.append(
                         value.rjust(
-                            widths[index]
+                            widths[
+                                index
+                            ]
                         )
                     )
                 else:
                     parts.append(
                         value.ljust(
-                            widths[index]
+                            widths[
+                                index
+                            ]
                         )
                     )
 
@@ -9118,17 +12599,21 @@ class DataTable(
 
         separator = "  ".join(
             "-" * width
-            for width in widths
+            for width
+            in widths
         )
 
         data_lines = [
             line_for(
                 row
             )
-            for row in cell_rows
+            for row
+            in cell_rows
         ]
 
-        title = self.infer_discord_title()
+        title = (
+            self.infer_discord_title()
+        )
 
         total_rows = len(
             self.filtered_data
@@ -9136,7 +12621,9 @@ class DataTable(
 
         page_note = ""
 
-        if total_rows > len(rows):
+        if total_rows > len(
+            rows
+        ):
             page_note = (
                 f" | rows "
                 f"{start + 1}-{end} "
@@ -9206,16 +12693,20 @@ class DataTable(
             compact_lines = []
 
             for column in self.columns:
-                label = DISCORD_HEADER_NAMES.get(
-                    column,
-                    column,
-                )
-                value = discord_short_value(
-                    first.get(
+                label = (
+                    DISCORD_HEADER_NAMES.get(
                         column,
-                        "",
-                    ),
-                    column,
+                        column,
+                    )
+                )
+                value = (
+                    discord_short_value(
+                        first.get(
+                            column,
+                            "",
+                        ),
+                        column,
+                    )
                 )
 
                 compact_lines.append(
@@ -9265,39 +12756,47 @@ class DataTable(
         self,
         event=None,
     ):
-        selected = (
-            self.tree.selection()
-        )
-
-        if not selected:
+        if not self.selected_indices:
             return "break"
 
-        rows = []
+        lines = []
 
-        for item in selected:
-            values = (
-                self.tree.item(
-                    item,
-                    "values",
-                )
+        for index in sorted(
+            self.selected_indices
+        ):
+            row = self._display_row(
+                index
             )
 
-            rows.append(
+            if row is None:
+                continue
+
+            values = [
+                self.display_value(
+                    row.get(
+                        column,
+                        "",
+                    )
+                )
+                for column
+                in self.columns
+            ]
+
+            lines.append(
                 "\t".join(
-                    str(value)
-                    for value
-                    in values
+                    values
                 )
             )
+
+        if not lines:
+            return "break"
 
         self.clipboard_clear()
-
         self.clipboard_append(
             "\n".join(
-                rows
+                lines
             )
         )
-
         self.update()
 
         return "break"
@@ -9307,56 +12806,50 @@ class DataTable(
         x,
         y,
     ):
-        item = (
-            self.tree.identify_row(
+        local_index = (
+            self._local_row_at_y(
                 y
             )
         )
 
-        column_id = (
-            self.tree.identify_column(
+        if local_index is None:
+            return
+
+        column_index, column, _, _ = (
+            self._column_at_x(
                 x
             )
         )
 
         if (
-            not item
-            or not column_id
+            column_index is None
+            or column is None
         ):
             return
 
-        try:
-            index = int(
-                column_id.replace(
-                    "#",
-                    "",
-                )
-            ) - 1
-
-        except ValueError:
-            return
-
-        values = (
-            self.tree.item(
-                item,
-                "values",
+        absolute_index = (
+            self._absolute_index(
+                local_index
             )
         )
 
-        if (
-            0
-            <= index
-            < len(values)
-        ):
-            self.clipboard_clear()
+        row = self._display_row(
+            absolute_index
+        )
 
-            self.clipboard_append(
-                str(
-                    values[index]
+        if row is None:
+            return
+
+        self.clipboard_clear()
+        self.clipboard_append(
+            self.display_value(
+                row.get(
+                    column,
+                    "",
                 )
             )
-
-            self.update()
+        )
+        self.update()
 
     def copy_cell(self):
         self._copy_clicked_cell(
@@ -9394,9 +12887,7 @@ class DataTable(
                 file,
                 fieldnames=self.columns,
             )
-
             writer.writeheader()
-
             writer.writerows(
                 self.filtered_data
             )
@@ -9619,11 +13110,17 @@ class PlotCanvas(tk.Frame):
         self,
         width,
         height,
+        bottom=100,
     ):
         left = 82
         right = 30
         top = 58
-        bottom = 100
+        bottom = max(
+            70,
+            int(
+                bottom
+            ),
+        )
 
         return (
             left,
@@ -9756,11 +13253,12 @@ class PlotCanvas(tk.Frame):
         y0,
         x1,
         y1,
+        x_title_offset=76,
     ):
         if self.x_label:
             self._draw_text(
                 (x0 + x1) / 2,
-                y1 + 76,
+                y1 + x_title_offset,
                 self.x_label,
                 fill=MUTED,
                 font=(
@@ -9866,10 +13364,89 @@ class PlotCanvas(tk.Frame):
         width,
         height,
     ):
+        # Bar charts represent separate categories. Hiding category names can
+        # make the graph actively misleading, so every bar always gets its
+        # full label. Rotate labels more aggressively when bars are crowded.
+        count = len(
+            self.plot_rows
+        )
+
+        preview_left = 82
+        preview_right = 30
+        preview_width = max(
+            40,
+            width
+            - preview_left
+            - preview_right,
+        )
+        preview_slot = (
+            preview_width
+            / max(
+                1,
+                count,
+            )
+        )
+
+        label_font = tkfont.Font(
+            family="Segoe UI",
+            size=8,
+        )
+
+        max_label_width = max(
+            [
+                label_font.measure(
+                    str(
+                        row.get(
+                            "x",
+                            "",
+                        )
+                    )
+                )
+                for row in self.plot_rows
+            ]
+            or [
+                0
+            ]
+        )
+
+        if preview_slot >= 95:
+            label_angle = 45
+        elif preview_slot >= 60:
+            label_angle = 55
+        elif preview_slot >= 38:
+            label_angle = 65
+        elif preview_slot >= 25:
+            label_angle = 75
+        else:
+            label_angle = 90
+
+        projected_label_height = (
+            max_label_width
+            * abs(
+                math.sin(
+                    math.radians(
+                        label_angle
+                    )
+                )
+            )
+        )
+
+        bottom_margin = min(
+            245,
+            max(
+                105,
+                int(
+                    projected_label_height
+                    + 48
+                ),
+            ),
+        )
+
         x0, y0, x1, y1 = (
             self._plot_area(
                 width,
                 height,
+                bottom=bottom_margin,
             )
         )
 
@@ -9901,9 +13478,6 @@ class PlotCanvas(tk.Frame):
             0.0
         )
         colors = self._series_colors()
-        count = len(
-            self.plot_rows
-        )
         slot = (
             (x1 - x0)
             / max(
@@ -9925,12 +13499,6 @@ class PlotCanvas(tk.Frame):
             group_width / 2
             if has_second
             else group_width
-        )
-
-        label_indices = (
-            self._category_label_indices(
-                count
-            )
         )
 
         for index, row in enumerate(
@@ -10004,33 +13572,32 @@ class PlotCanvas(tk.Frame):
                     outline="",
                 )
 
-            if index in label_indices:
-                label = str(
-                    row["x"]
-                )
-                if len(label) > 18:
-                    label = (
-                        label[:17]
-                        + "…"
-                    )
-                self._draw_text(
-                    center,
-                    y1 + 12,
-                    label,
-                    anchor="ne",
-                    fill=MUTED,
-                    font=(
-                        "Segoe UI",
-                        8,
-                    ),
-                    angle=45,
-                )
+            label = str(
+                row["x"]
+            )
+
+            self._draw_text(
+                center,
+                y1 + 12,
+                label,
+                anchor="ne",
+                fill=MUTED,
+                font=(
+                    "Segoe UI",
+                    8,
+                ),
+                angle=label_angle,
+            )
 
         self._draw_axis_titles(
             x0,
             y0,
             x1,
             y1,
+            x_title_offset=(
+                bottom_margin
+                - 18
+            ),
         )
         self._draw_legend(
             width
@@ -10648,6 +14215,9 @@ class EconomyViewer:
             "overview"
         )
 
+        self.selected_income_source = None
+        self.selected_purchase_item = None
+
         self.theme_name = THEME_NAME
 
         self.page_explanation_cards = {}
@@ -10661,6 +14231,7 @@ class EconomyViewer:
         self.sim_target_enabled_vars = {}
         self.sim_target_value_vars = {}
         self.sim_target_current_labels = {}
+        self.sim_target_actual_labels = {}
         self.sim_target_result_labels = {}
 
         self.last_sim_settings = (
@@ -10859,6 +14430,17 @@ class EconomyViewer:
         except Exception:
             activity_group_basis = "Combined activity"
 
+        selected_income_source = getattr(
+            self,
+            "selected_income_source",
+            None,
+        )
+        selected_purchase_item = getattr(
+            self,
+            "selected_purchase_item",
+            None,
+        )
+
         try:
             plot_state = {
                 "source": self.plot_source_dropdown.get(),
@@ -10901,6 +14483,7 @@ class EconomyViewer:
         self.sim_target_enabled_vars = {}
         self.sim_target_value_vars = {}
         self.sim_target_current_labels = {}
+        self.sim_target_actual_labels = {}
         self.sim_target_result_labels = {}
         self.last_sim_settings = None
         self.sim_dirty = True
@@ -10972,6 +14555,19 @@ class EconomyViewer:
             )
 
             self.populate_all()
+
+            if selected_income_source:
+                self.view_income_source_users(
+                    selected_income_source,
+                    scroll=False,
+                )
+
+            if selected_purchase_item:
+                self.view_purchase_item_users(
+                    selected_purchase_item,
+                    scroll=False,
+                )
+
             self.update_kpis()
             self.update_user_projection_info()
             self.update_sim_window_info()
@@ -11332,6 +14928,11 @@ class EconomyViewer:
             (
                 "sources",
                 "Income Sources",
+            ),
+
+            (
+                "purchases",
+                "Purchases",
             ),
 
             (
@@ -11947,8 +15548,11 @@ class EconomyViewer:
             "A quick explanation of what happened to player money.",
             "summary_table",
             (
-                "This box will tell you how much money users were given, how much they spent or lost, whether users "
-                "ended up richer or poorer overall, and what the same pace would look like over a month."
+                "This page answers one simple question: did the economy make users richer or poorer? "
+                "NET is the final result after gains and losses are combined. Gross inflow/outflow only explains how that NET happened. "
+                "Any single balance-change transaction above 1,000,000 in absolute value is ignored everywhere in the app; exactly 1,000,000 is allowed. "
+                "Where a 95% CI is shown, the app uses 2,000 deterministic bootstrap resamples of users. The middle estimate is still the main result; the CI tells you how uncertain that average is. Narrow is more stable, wide is less certain. "
+                "The table below has an 'Every number explained' section that defines each statistic one by one."
             ),
         )
 
@@ -11966,17 +15570,11 @@ class EconomyViewer:
 
         self.page_frames[
             "sources"
-        ] = self.build_table_page(
-            "Income Sources",
-            "See which commands and games make users richer or poorer.",
-            "sources_table",
-            (
-                "This box will point out which game or command gave users the most money, which took the most, "
-                "how often they were used, and what that means for the economy. Game-related spending is kept with "
-                "the game it belongs to: chicken purchases count with Cock Fight, and animal/provision purchases count "
-                "with Animal Race instead of being hidden inside a generic Buy total."
-            ),
-        )
+        ] = self.build_income_sources_page()
+
+        self.page_frames[
+            "purchases"
+        ] = self.build_purchases_page()
 
         self.page_frames[
             "hourly"
@@ -11985,8 +15583,9 @@ class EconomyViewer:
             "See what users gained or lost during each hour.",
             "hourly_table",
             (
-                "This box will tell you which hour was best for users, which was worst, which was busiest, "
-                "and how many people were actually using the economy then."
+                "Each row combines every balance change inside one clock hour. "
+                "NET Profit tells you whether users became richer or poorer during that hour. "
+                "Every other number in the table is explained directly below it."
             ),
         )
 
@@ -11997,8 +15596,9 @@ class EconomyViewer:
             "See what users gained or lost on each day.",
             "daily_table",
             (
-                "This box will tell you which day users gained the most, which day they lost the most, "
-                "and which day had the most economy activity."
+                "Each row combines every balance change on one calendar day. "
+                "Use NET Profit for the real final result. Gross Earned does not subtract losses. "
+                "Every number is defined below the table."
             ),
         )
 
@@ -12009,8 +15609,9 @@ class EconomyViewer:
             "One row for each user and hour in which they used the economy.",
             "user_hours_table",
             (
-                "This box will point out the strongest and weakest one-hour stretches for individual users, "
-                "so you can spot unusually lucky, unlucky or intense periods of play."
+                "Each row is one user during one specific clock hour. "
+                "Use NET Profit for the user's final result in that hour. "
+                "The table explains every money value and count."
             ),
         )
 
@@ -12021,8 +15622,9 @@ class EconomyViewer:
             "Every individual time a user gained, spent or lost money.",
             "transactions_table",
             (
-                "This box will tell you how many individual money changes happened, the biggest amount someone "
-                "received at once, and the biggest amount someone lost or spent at once."
+                "Each row is one raw balance change. Cash and Bank are its two parts; Total is their combined effect. "
+                "Positive means money entered the user's balance and negative means money left it. "
+                "Every field is explained below the table."
             ),
         )
 
@@ -12092,6 +15694,628 @@ class EconomyViewer:
 
         return page
 
+    def build_income_sources_page(self):
+        page = self.new_page()
+
+        self.make_page_header(
+            page,
+            "Income Sources",
+            (
+                "See which commands and games make users richer or poorer. "
+                "Double-click a source to rank the users who earned the most NET from it."
+            ),
+        )
+
+        help_card = self.make_help_card(
+            page,
+            (
+                "All earning numbers and earning percentages are NET-based. "
+                "If a source paid 1,000 and took 700, the app calls that 300 earned, not 1,000. "
+                "Gross Earned and Gross Lost are only shown to explain how the NET result happened. "
+                "The table below defines every number and rate."
+            ),
+            height=120,
+        )
+
+        self.page_explanation_cards[
+            "sources_table"
+        ] = help_card
+
+        source_panel = RoundedPanel(
+            page,
+            height=610,
+            padding=18,
+        )
+        source_panel.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        self.sources_table = DataTable(
+            source_panel.inner,
+            height=16,
+            double_click_callback=(
+                self.open_income_source_from_row
+            ),
+        )
+        self.sources_table.pack(
+            fill=tk.BOTH,
+            expand=True,
+        )
+
+        self.source_user_detail_card = ExplanationCard(
+            page,
+            title="Income source users",
+            text=(
+                "Double-click an income source above to see its users ranked from highest to lowest NET earned."
+            ),
+            min_height=116,
+        )
+        self.source_user_detail_card.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        self.source_user_panel = RoundedPanel(
+            page,
+            height=650,
+            padding=18,
+        )
+        self.source_user_panel.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        self.source_user_title_label = tk.Label(
+            self.source_user_panel.inner,
+            text="No income source selected",
+            bg=CARD,
+            fg=TEXT,
+            font=(
+                "Bahnschrift",
+                12,
+                "bold",
+            ),
+            anchor="w",
+            justify=tk.LEFT,
+        )
+        self.source_user_title_label.pack(
+            fill=tk.X,
+            anchor="w",
+            pady=(0, 5),
+        )
+
+        self.source_user_subtitle_label = tk.Label(
+            self.source_user_panel.inner,
+            text=(
+                "Double-click a row in Income Sources. "
+                "You can then double-click a user here to open their full User Breakdown."
+            ),
+            bg=CARD,
+            fg=MUTED,
+            font=(
+                "Segoe UI",
+                9,
+            ),
+            anchor="w",
+            justify=tk.LEFT,
+        )
+        self.source_user_subtitle_label.pack(
+            fill=tk.X,
+            anchor="w",
+            pady=(0, 10),
+        )
+
+        self.source_users_table = DataTable(
+            self.source_user_panel.inner,
+            height=20,
+            double_click_callback=(
+                self.open_user_from_row
+            ),
+        )
+        self.source_users_table.pack(
+            fill=tk.X,
+            expand=False,
+        )
+
+        return page
+
+    def open_income_source_from_row(
+        self,
+        row,
+    ):
+        reason = str(
+            row.get(
+                "Reason",
+                "",
+            )
+        ).strip()
+
+        if not reason:
+            return
+
+        self.view_income_source_users(
+            reason,
+            scroll=True,
+        )
+
+    def view_income_source_users(
+        self,
+        reason,
+        scroll=False,
+    ):
+        reason = str(
+            reason
+        ).strip()
+
+        if not reason:
+            return
+
+        rows = (
+            self.analyzer
+            .get_income_source_user_breakdown(
+                reason
+            )
+        )
+
+        self.selected_income_source = (
+            reason
+        )
+
+        self.source_users_table.set_data(
+            rows
+        )
+
+        source_row = next(
+            (
+                row
+                for row
+                in self.analyzer.reason_stats
+                if row.get(
+                    "Reason"
+                ) == reason
+            ),
+            None,
+        )
+
+        self.source_user_title_label.config(
+            text=(
+                f"{reason} - users ranked by NET earned"
+            )
+        )
+
+        if not rows:
+            self.source_user_detail_card.set_text(
+                (
+                    f"No users have transactions for '{reason}' under the current filters."
+                )
+            )
+            return
+
+        top = rows[0]
+        profitable = [
+            row
+            for row in rows
+            if float(
+                row[
+                    "Net Earned"
+                ]
+            ) > 0
+        ]
+        losing = [
+            row
+            for row in rows
+            if float(
+                row[
+                    "Net Earned"
+                ]
+            ) < 0
+        ]
+
+        total_net = (
+            float(
+                source_row[
+                    "Net Profit"
+                ]
+            )
+            if source_row
+            else sum(
+                float(
+                    row[
+                        "Net Earned"
+                    ]
+                )
+                for row in rows
+            )
+        )
+
+        if total_net > 0:
+            source_result = (
+                f"users collectively gained {total_net:,.0f} NET"
+            )
+        elif total_net < 0:
+            source_result = (
+                f"users collectively lost {abs(total_net):,.0f} NET"
+            )
+        else:
+            source_result = (
+                "users collectively finished about even"
+            )
+
+        top_net = float(
+            top[
+                "Net Earned"
+            ]
+        )
+
+        if top_net > 0:
+            top_text = (
+                f"{top['Username']} is the highest NET earner at +{top_net:,.0f}"
+            )
+        elif top_net < 0:
+            top_text = (
+                f"even the highest-ranked user, {top['Username']}, is at {top_net:,.0f} NET"
+            )
+        else:
+            top_text = (
+                f"the highest-ranked user, {top['Username']}, is about even"
+            )
+
+        self.source_user_detail_card.set_text(
+            (
+                f"For '{reason}', {source_result} across {len(rows):,} participating users in the selected period. "
+                f"{len(profitable):,} users have a positive NET result and {len(losing):,} have a negative NET result. "
+                f"{top_text}.\n\n"
+                "The table is sorted by Net Earned from highest to lowest. "
+                "'Net Earned' is payouts minus losses/costs from this same source. "
+                "'Net Earnings Share %' is each profitable user's share of all positive NET earned from this source. "
+                "A losing or break-even user therefore has 0% earning share even if they received large gross payouts. "
+                "Gross Earned and Gross Lost are shown only so you can see how that NET was produced. "
+                "The 'Every number explained' section under the table defines every column one by one."
+            )
+        )
+
+        if scroll:
+            self.root.after(
+                50,
+                lambda:
+                    self.scroll_area.scroll_to_widget(
+                        self.source_user_detail_card
+                    ),
+            )
+
+    def build_purchases_page(self):
+        page = self.new_page()
+
+        self.make_page_header(
+            page,
+            "Purchases",
+            (
+                "See exactly which items users buy from `buy item (Item Name)` logs, "
+                "then double-click an item to see who bought it."
+            ),
+        )
+
+        self.purchase_help_card = self.make_help_card(
+            page,
+            (
+                "This page reads the item name from `buy item (Item Name)`. "
+                "Old shop-list prefixes such as `1. VIP`, `2. Hen Expert` and `3. Roulette Master` are treated as numbering, so they are merged with `VIP`, `Hen Expert` and `Roulette Master` instead of appearing as separate items. "
+                "Spending means NET spending: charges increase it and refunds/corrections reduce it. "
+                "The table below explains Purchases, Buyers, averages, percentages and last-30-day values one by one."
+            ),
+            height=120,
+        )
+
+        item_panel = RoundedPanel(
+            page,
+            height=610,
+            padding=18,
+        )
+        item_panel.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        self.purchases_table = DataTable(
+            item_panel.inner,
+            height=16,
+            double_click_callback=(
+                self.open_purchase_item_from_row
+            ),
+        )
+        self.purchases_table.pack(
+            fill=tk.BOTH,
+            expand=True,
+        )
+
+        self.purchase_item_detail_card = ExplanationCard(
+            page,
+            title="Item buyers",
+            text=(
+                "Double-click an item above to see the users who spent the most NET on it."
+            ),
+            min_height=116,
+        )
+        self.purchase_item_detail_card.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        self.purchase_user_panel = RoundedPanel(
+            page,
+            height=650,
+            padding=18,
+        )
+        self.purchase_user_panel.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
+
+        self.purchase_user_title_label = tk.Label(
+            self.purchase_user_panel.inner,
+            text="No item selected",
+            bg=CARD,
+            fg=TEXT,
+            font=(
+                "Bahnschrift",
+                12,
+                "bold",
+            ),
+            anchor="w",
+            justify=tk.LEFT,
+        )
+        self.purchase_user_title_label.pack(
+            fill=tk.X,
+            anchor="w",
+            pady=(0, 5),
+        )
+
+        self.purchase_user_subtitle_label = tk.Label(
+            self.purchase_user_panel.inner,
+            text=(
+                "Double-click an item above. "
+                "Double-clicking a buyer here opens their full User Breakdown."
+            ),
+            bg=CARD,
+            fg=MUTED,
+            font=(
+                "Segoe UI",
+                9,
+            ),
+            anchor="w",
+            justify=tk.LEFT,
+        )
+        self.purchase_user_subtitle_label.pack(
+            fill=tk.X,
+            anchor="w",
+            pady=(0, 10),
+        )
+
+        self.purchase_users_table = DataTable(
+            self.purchase_user_panel.inner,
+            height=20,
+            double_click_callback=(
+                self.open_user_from_row
+            ),
+        )
+        self.purchase_users_table.pack(
+            fill=tk.X,
+            expand=False,
+        )
+
+        return page
+
+    def open_purchase_item_from_row(
+        self,
+        row,
+    ):
+        item_name = str(
+            row.get(
+                "Item",
+                "",
+            )
+        ).strip()
+
+        if not item_name:
+            return
+
+        self.view_purchase_item_users(
+            item_name,
+            scroll=True,
+        )
+
+    def view_purchase_item_users(
+        self,
+        item_name,
+        scroll=False,
+    ):
+        item_name = str(
+            item_name
+        ).strip()
+
+        if not item_name:
+            return
+
+        rows = (
+            self.analyzer
+            .get_purchase_item_user_breakdown(
+                item_name
+            )
+        )
+
+        self.selected_purchase_item = (
+            item_name
+        )
+
+        self.purchase_users_table.set_data(
+            rows
+        )
+
+        item_row = next(
+            (
+                row
+                for row
+                in self.analyzer.purchase_item_stats
+                if purchase_item_key(
+                    row.get(
+                        "Item",
+                        "",
+                    )
+                )
+                == purchase_item_key(
+                    item_name
+                )
+            ),
+            None,
+        )
+
+        self.purchase_user_title_label.config(
+            text=(
+                f"{item_name} - buyers ranked by NET spent"
+            )
+        )
+
+        if not rows:
+            self.purchase_item_detail_card.set_text(
+                (
+                    f"No matching purchase transactions for '{item_name}' under the current filters."
+                )
+            )
+            return
+
+        top = rows[0]
+
+        total_spent = (
+            float(
+                item_row[
+                    "Net Spent"
+                ]
+            )
+            if item_row
+            else sum(
+                float(
+                    row[
+                        "Net Spent"
+                    ]
+                )
+                for row in rows
+            )
+        )
+
+        purchase_count = (
+            int(
+                item_row[
+                    "Purchases"
+                ]
+            )
+            if item_row
+            else sum(
+                int(
+                    row[
+                        "Purchases"
+                    ]
+                )
+                for row in rows
+            )
+        )
+
+        buyer_count = len(
+            rows
+        )
+
+        self.purchase_item_detail_card.set_text(
+            (
+                f"'{item_name}' has {purchase_count:,} recorded purchases from {buyer_count:,} buyers in the selected period, "
+                f"for {total_spent:,.0f} NET spent in total. "
+                f"{top['Username']} is the biggest buyer at {top['Net Spent']:,.0f} NET spent across {top['Purchases']:,} purchases.\n\n"
+                "'Net Spent' is the amount that actually left the user's balance after all matching `buy item (...)` entries are combined. "
+                "'Net Spend Share %' is the buyer's share of all positive NET spending on this item. "
+                "'Last 30d Actual Spent' is the real unscaled amount spent on the item during the newest 30 days in the database. "
+                "The 'Every number explained' section under the table defines every column one by one."
+            )
+        )
+
+        if scroll:
+            self.root.after(
+                50,
+                lambda:
+                    self.scroll_area.scroll_to_widget(
+                        self.purchase_item_detail_card
+                    ),
+            )
+
+    def update_purchase_overview_text(self):
+        rows = (
+            self.analyzer
+            .purchase_item_stats
+        )
+
+        if not rows:
+            self.purchase_help_card.set_text(
+                (
+                    "No `buy item (Item Name)` transactions match the current filters. "
+                    "This page only parses item purchases with that exact log structure; Animal Race animal/provision purchases are separate formats."
+                )
+            )
+            return
+
+        most_spent = max(
+            rows,
+            key=lambda row:
+                float(
+                    row[
+                        "Net Spent"
+                    ]
+                ),
+        )
+        most_bought = max(
+            rows,
+            key=lambda row:
+                int(
+                    row[
+                        "Purchases"
+                    ]
+                ),
+        )
+        widest = max(
+            rows,
+            key=lambda row:
+                int(
+                    row[
+                        "Unique Buyers"
+                    ]
+                ),
+        )
+
+        total_purchases = sum(
+            int(
+                row[
+                    "Purchases"
+                ]
+            )
+            for row in rows
+        )
+        total_spent = sum(
+            float(
+                row[
+                    "Net Spent"
+                ]
+            )
+            for row in rows
+        )
+
+        self.purchase_help_card.set_text(
+            (
+                f"The current selection contains {len(rows):,} different `buy item (...)` items and {total_purchases:,} recorded purchases, "
+                f"with {total_spent:,.0f} NET spent across them.\n\n"
+                f"Most NET spent: {most_spent['Item']} at {most_spent['Net Spent']:,.0f}. "
+                f"Most individual purchases: {most_bought['Item']} with {most_bought['Purchases']:,}. "
+                f"Widest buyer reach: {widest['Item']} with {widest['Unique Buyers']:,} unique buyers.\n\n"
+                "Double-click any item to see its buyers ranked by NET spent."
+            )
+        )
+
     def build_users_page(self):
         page = self.new_page()
 
@@ -12106,7 +16330,10 @@ class EconomyViewer:
 
         self.user_projection_card = self.make_help_card(
             page,
-            "Loading user summary...",
+            (
+                "Loading user summary... When this app says a user earned money, it means NET after losses are subtracted. "
+                "The Users table below explains every projection, actual value, activity number, count and percentage."
+            ),
             height=110,
         )
 
@@ -12155,7 +16382,10 @@ class EconomyViewer:
 
         self.user_breakdown_help_card = self.make_help_card(
             page,
-            "Select a user to see an explanation of their actual numbers.",
+            (
+                "Select a user to see what their numbers mean. "
+                "Every table on this page has its own 'Every number explained' section."
+            ),
             height=110,
         )
 
@@ -12354,9 +16584,9 @@ class EconomyViewer:
         self.activity_group_help_card = self.make_help_card(
             page,
             (
-                "Users are grouped by natural activity levels instead of forcing the same number of people into every group. "
-                "Combined activity uses both estimated active hours per day and balance changes per day. You can also group only by active hours or only by transactions. "
-                "The detailed section below lets you inspect historical game averages and the individual members inside any group."
+                "Users are grouped by natural differences in economy use, so groups do not need to contain the same number of people. "
+                "Combined activity uses both estimated active time and transaction rate. "
+                "Every table below explains the difference between projections, actual values, per-user values and per-active-hour values."
             ),
             height=130,
         )
@@ -12698,10 +16928,18 @@ class EconomyViewer:
             (
                 f"The current grouping uses {basis.lower()}. Users are clustered by natural gaps in activity instead of being forced into equal-sized groups. "
                 "Some groups can therefore contain many more people than others, and a group can be empty if the data does not contain a distinct activity level for it.\n\n"
-                f"A typical {quietest['Group']} member is active for about {quietest['Avg Active Hrs / Day']:,.2f} hours per day and has about {quietest['Avg Transactions / Day']:,.1f} balance changes per day. "
-                f"At the same historical pace they would {money_words(quietest['Avg 24h Net'], '24 hours')} and {money_words(quietest['Avg 30d Net'], '30 days')}.\n\n"
-                f"A typical {busiest['Group']} member is active for about {busiest['Avg Active Hrs / Day']:,.2f} hours per day and has about {busiest['Avg Transactions / Day']:,.1f} balance changes per day. "
-                f"At the same historical pace they would {money_words(busiest['Avg 24h Net'], '24 hours')} and {money_words(busiest['Avg 30d Net'], '30 days')}.\n\n"
+                f"A typical {quietest['Group']} member is active for about {quietest['Avg Active Hrs / Day']:,.2f} hours per day (95% CI {quietest['Avg Active Hrs / Day 95% CI']}) "
+                f"and has about {quietest['Avg Transactions / Day']:,.1f} balance changes per day (95% CI {quietest['Avg Transactions / Day 95% CI']}). "
+                f"The group averages {quietest['Net / User Hour']:+,.2f} net per estimated active user-hour (95% CI {quietest['Net / User Hour 95% CI']}). "
+                f"At the same historical pace they would {money_words(quietest['Avg 24h Net'], '24 hours')} and {money_words(quietest['Avg 30d Net'], '30 days')}; "
+                f"the 30-day average has a 95% CI of {quietest['Avg 30d Net 95% CI']}. "
+                f"Their actual average net over the newest 30 days in the database was {quietest['Avg Last 30d Actual']:+,.0f}.\n\n"
+                f"A typical {busiest['Group']} member is active for about {busiest['Avg Active Hrs / Day']:,.2f} hours per day (95% CI {busiest['Avg Active Hrs / Day 95% CI']}) "
+                f"and has about {busiest['Avg Transactions / Day']:,.1f} balance changes per day (95% CI {busiest['Avg Transactions / Day 95% CI']}). "
+                f"The group averages {busiest['Net / User Hour']:+,.2f} net per estimated active user-hour (95% CI {busiest['Net / User Hour 95% CI']}). "
+                f"At the same historical pace they would {money_words(busiest['Avg 24h Net'], '24 hours')} and {money_words(busiest['Avg 30d Net'], '30 days')}; "
+                f"the 30-day average has a 95% CI of {busiest['Avg 30d Net 95% CI']}. "
+                f"Their actual average net over the newest 30 days in the database was {busiest['Avg Last 30d Actual']:+,.0f}.\n\n"
                 "Double-click any group, or use the Detailed group selector below, to inspect its game-by-game averages and individual members."
             )
         )
@@ -12901,13 +17139,23 @@ class EconomyViewer:
                 "avg_game_net_per_member_30d"
             ]
         )
+        actual30 = float(
+            details[
+                "avg_actual_30d_net_per_member"
+            ]
+        )
+
         self.activity_group_detail_card.set_text(
             (
                 f"{group_name} contains {details['members']:,} users. A typical member is active for about {active_hours:,.2f} hours per day, makes about {transactions:,.1f} balance changes per day, and is active on the equivalent of about {active_days:,.1f} days out of 30. "
-                f"Across the whole included economy, {overall_text}; at the same pace that is about {net30:+,.0f} over 30 days.\n\n"
-                f"Looking only at historical game activity, the games contributed about {game24:+,.0f} per member per day, or about {game30:+,.0f} over 30 days. "
+                f"Across the whole included economy, {overall_text}; at the same pace that is about {net30:+,.0f} over 30 days. "
+                f"The actual average member net during the newest 30 days in the database was {actual30:+,.0f}.\n\n"
+                f"Looking only at historical game activity, the games contributed about {game24:+,.0f} per member per day, or about {game30:+,.0f} projected over 30 days. "
                 f"{game_text}\n\n"
                 "'Avg Plays / Player / Day' only averages across members who actually played that game. "
+                "'Avg Net / User' divides that game's total historical net by every member of the activity group, so non-players effectively contribute zero. "
+                "'Net / User Hour' divides that game's total historical net by the group's combined estimated active economy hours. "
+                "It measures the game's contribution per active user-hour, not the exact number of hours spent specifically playing that game. "
                 "The game table is descriptive history, and the fixed-frequency Game Simulator does not use these historical play counts or preferences."
             )
         )
@@ -12924,11 +17172,34 @@ class EconomyViewer:
         self.plot_help_card = self.make_help_card(
             page,
             (
-                "Choose a data source, X value and Y value, then pick a chart type. Scatter plots are useful for relationships such as activity versus earnings. "
-                "Line plots are best for Hourly or Daily trends. Bar plots are useful for comparing categories such as games, income sources or activity groups. "
-                "Histograms show the distribution of one numeric value across users or transactions."
+                "Plots turn the same table numbers into pictures. They do not change the underlying values. "
+                "If you are unsure what an X or Y statistic means, the source table gives the exact definition."
             ),
-            height=120,
+            height=100,
+        )
+
+        self.plot_number_guide_card = ExplanationCard(
+            page,
+            title="Every plot number explained",
+            text=(
+                "Quick plot: a ready-made chart setup.\n\n"
+                "Source: the table supplying the rows.\n\n"
+                "Activity group: only matters for Activity Group Games and chooses which group's game rows are used.\n\n"
+                "X: the horizontal value/category. In a scatter plot it is the first numeric measurement you are comparing.\n\n"
+                "Y: the main number being plotted. Its meaning is exactly the same as in the source table.\n\n"
+                "Y2: an optional second number for comparison. None means no second Y value.\n\n"
+                "Bar: compare separate categories. Every bar category is labelled in full; labels are rotated when needed instead of being skipped. "
+                "Line: show ordered change, especially hours/days. Scatter: compare two numeric measurements row by row. Histogram: group one numeric measurement into ranges to show its distribution.\n\n"
+                "Aggregation: how rows with the same X are combined. Sum adds them; Average takes their mean; None keeps rows separate where possible.\n\n"
+                "Sort: changes visual order only, not the data.\n\n"
+                "Max points: maximum rows drawn. 0 means no manual limit.\n\n"
+                "Pearson correlation, when shown: from -1 to +1. Near +1 means the values tend to rise together; near -1 means one tends to fall as the other rises; near 0 means little linear relationship. Correlation does not prove cause."
+            ),
+            min_height=250,
+        )
+        self.plot_number_guide_card.pack(
+            fill=tk.X,
+            pady=(0, 12),
         )
 
         controls = RoundedPanel(
@@ -12970,16 +17241,17 @@ class EconomyViewer:
         self.plot_preset_dropdown = SingleSelectMenuButton(
             row1,
             options=[
-                "User activity vs 30d result",
-                "User transactions vs 30d result",
+                "User activity vs projected/actual 30d",
+                "User transactions vs projected/actual 30d",
                 "Income source net",
+                "Purchase spending by item",
                 "Hourly net trend",
                 "Daily net trend",
-                "Activity group 30d net",
+                "Activity group projected/actual 30d",
                 "Activity group game profit",
                 "Simulator current vs proposed",
             ],
-            value="User activity vs 30d result",
+            value="User activity vs projected/actual 30d",
             width=250,
         )
         self.plot_preset_dropdown.pack(
@@ -13022,6 +17294,7 @@ class EconomyViewer:
                 "Activity Groups",
                 "Activity Group Games",
                 "Income Sources",
+                "Purchases",
                 "Hourly",
                 "Daily",
                 "User Hours",
@@ -13360,6 +17633,11 @@ class EconomyViewer:
                 self.analyzer.reason_stats
             )
 
+        if source == "Purchases":
+            return list(
+                self.analyzer.purchase_item_stats
+            )
+
         if source == "Hourly":
             return list(
                 self.analyzer.hourly_stats
@@ -13610,21 +17888,21 @@ class EconomyViewer:
         preset = self.plot_preset_dropdown.get()
 
         presets = {
-            "User activity vs 30d result": {
+            "User activity vs projected/actual 30d": {
                 "source": "Users",
                 "x": "Est. Active Hrs",
                 "y": "30d Net",
-                "y2": "None",
+                "y2": "Last 30d Actual",
                 "chart": "Scatter",
                 "aggregation": "None",
                 "sort": "Original order",
                 "max_points": "0",
             },
-            "User transactions vs 30d result": {
+            "User transactions vs projected/actual 30d": {
                 "source": "Users",
                 "x": "Transactions",
                 "y": "30d Net",
-                "y2": "None",
+                "y2": "Last 30d Actual",
                 "chart": "Scatter",
                 "aggregation": "None",
                 "sort": "Original order",
@@ -13635,6 +17913,16 @@ class EconomyViewer:
                 "x": "Reason",
                 "y": "Net Profit",
                 "y2": "None",
+                "chart": "Bar",
+                "aggregation": "None",
+                "sort": "Y descending",
+                "max_points": "0",
+            },
+            "Purchase spending by item": {
+                "source": "Purchases",
+                "x": "Item",
+                "y": "Net Spent",
+                "y2": "Purchases",
                 "chart": "Bar",
                 "aggregation": "None",
                 "sort": "Y descending",
@@ -13660,11 +17948,11 @@ class EconomyViewer:
                 "sort": "Original order",
                 "max_points": "0",
             },
-            "Activity group 30d net": {
+            "Activity group projected/actual 30d": {
                 "source": "Activity Groups",
                 "x": "Group",
                 "y": "Avg 30d Net",
-                "y2": "None",
+                "y2": "Avg Last 30d Actual",
                 "chart": "Bar",
                 "aggregation": "None",
                 "sort": "Original order",
@@ -13674,7 +17962,7 @@ class EconomyViewer:
                 "source": "Activity Group Games",
                 "x": "Game",
                 "y": "Avg 30d Net / Member",
-                "y2": "None",
+                "y2": "Avg Last 30d Actual / Member",
                 "chart": "Bar",
                 "aggregation": "None",
                 "sort": "Y descending",
@@ -14403,18 +18691,46 @@ class EconomyViewer:
         self.sim_window_card = self.make_help_card(
             page,
             (
-                "Run the simulation and this box will explain the results in plain language. Historical game counts are not used to decide how much somebody plays. "
-                "Animal Race is included automatically, including race bets, winnings, animal purchases and provision purchases. "
-                "Its bet amount is kept from the history instead of being shown as a normal configurable bet limit. "
-                "Animal and provision purchases are kept at the rate actually seen in the history when you change race activity, "
-                "so increasing the number of races does not pretend that someone buys the same horse again for every extra race."
+                "The simulator estimates how different settings could change users' NET results. "
+                "Historical data estimates active time, bets and game economics, but historical game popularity does not control play frequency. "
+                "Every result table below explains every output column."
             ),
-            height=130,
+            height=105,
         )
 
         self.page_explanation_cards[
             "simulator"
         ] = self.sim_window_card
+
+        self.simulator_number_guide_card = ExplanationCard(
+            page,
+            title="Every simulator number explained",
+            text=(
+                "Current plays of EACH game / 5 active min: plays of every included game during each five minutes of estimated active economy time. A value of 2 means 2 Blackjack plays, 2 Roulette plays, 2 Slot plays, etc., not 2 total games.\n\n"
+                "Proposed plays of EACH game / 5 active min: the play rate you want to test.\n\n"
+                "Current Min / Current Max: the server's current bet range used as the comparison starting point.\n\n"
+                "Proposed Min / Proposed Max: the new bet range being tested. Historical betting positions are mapped into this new range.\n\n"
+                "Blackjack Decks: the recorded deck setting. The command can be generated, but the app does not pretend deck count has a precisely known profit effect.\n\n"
+                "Slot Symbols: number of slot symbols used by the probability model.\n\n"
+                "Slot Multiplier: payout multiplier when Slots wins. Higher means a larger winning payout.\n\n"
+                "Cock Fight Start %: starting fight win chance. 55 means 55%.\n\n"
+                "Cock Fight Max %: highest win chance a chicken can reach.\n\n"
+                "Chicken Price: cost of buying a replacement Chicken; that cost reduces Cock Fight NET profit.\n\n"
+                "Lock: the optimizer is not allowed to change that proposed value.\n\n"
+                "Current simulated 30d: simulator estimate of average NET per member over 30 days with current settings.\n\n"
+                "Actual last 30d: real average NET per member from the newest 30 days of the database. This is history, not simulation.\n\n"
+                "Target 30d: the average NET per member you want the optimizer to aim for. Positive means user profit; negative means user loss.\n\n"
+                "Optimizer result: predicted 30-day NET after the optimized proposal. Closer to Target 30d means a better match. Its 95% CI resamples the activity levels of members in that group while holding the game model fixed.\n\n"
+                "95% CI: a bootstrap uncertainty range. The app resamples whole users 2,000 times. A narrow CI means the average is relatively stable in the observed users; a wide CI means you should be more cautious. It is not a promise about the future.\n\n"
+                "24h Change: Proposed 24h Net minus Current 24h Net. Positive is more favorable to users; negative is less favorable.\n\n"
+                "Animal Race: race frequency scales, but animal/provision purchase costs stay tied to their historical purchase rate so a reusable horse is not bought again for every extra race."
+            ),
+            min_height=370,
+        )
+        self.simulator_number_guide_card.pack(
+            fill=tk.X,
+            pady=(0, 12),
+        )
 
         global_panel = RoundedPanel(
             page,
@@ -15334,9 +19650,10 @@ class EconomyViewer:
         header_items = [
             ("Use", 7),
             ("Activity group", 18),
-            ("Current simulated 30d", 22),
+            ("Current simulated 30d + 95% CI", 34),
+            ("Actual last 30d", 20),
             ("Target 30d", 18),
-            ("Optimizer result", 22),
+            ("Optimizer result + 95% CI", 42),
         ]
         for label_text, width in header_items:
             tk.Label(
@@ -15412,7 +19729,7 @@ class EconomyViewer:
             current_label = tk.Label(
                 target_row,
                 text="Not calculated",
-                width=22,
+                width=34,
                 anchor="w",
                 bg=CARD,
                 fg=MUTED,
@@ -15430,6 +19747,30 @@ class EconomyViewer:
                     self.toggle_activity_target_group(name),
             )
             self.sim_target_current_labels[group_name] = current_label
+
+            actual_label = tk.Label(
+                target_row,
+                text="Not calculated",
+                width=20,
+                anchor="w",
+                bg=CARD,
+                fg=MUTED,
+            )
+            actual_label.pack(
+                side=tk.LEFT,
+                padx=(0, 8),
+            )
+            actual_label.config(
+                cursor="hand2"
+            )
+            actual_label.bind(
+                "<Button-1>",
+                lambda event, name=group_name:
+                    self.toggle_activity_target_group(name),
+            )
+            self.sim_target_actual_labels[
+                group_name
+            ] = actual_label
 
             target_entry = RoundedEntry(
                 target_row,
@@ -15462,7 +19803,7 @@ class EconomyViewer:
             result_label = tk.Label(
                 target_row,
                 text="-",
-                width=28,
+                width=42,
                 anchor="w",
                 bg=CARD,
                 fg=MUTED,
@@ -16540,6 +20881,77 @@ class EconomyViewer:
             self.analyzer.reason_stats
         )
 
+        self.purchases_table.set_data(
+            self.analyzer.purchase_item_stats
+        )
+        self.update_purchase_overview_text()
+
+        if self.selected_purchase_item:
+            available_purchase_items = {
+                purchase_item_key(
+                    row[
+                        "Item"
+                    ]
+                )
+                for row
+                in self.analyzer.purchase_item_stats
+            }
+
+            if (
+                purchase_item_key(
+                    self.selected_purchase_item
+                )
+                in available_purchase_items
+            ):
+                self.view_purchase_item_users(
+                    self.selected_purchase_item,
+                    scroll=False,
+                )
+            else:
+                self.selected_purchase_item = None
+                self.purchase_users_table.set_data(
+                    []
+                )
+                self.purchase_user_title_label.config(
+                    text="No item selected"
+                )
+                self.purchase_item_detail_card.set_text(
+                    (
+                        "Double-click an item above to see the users who spent the most NET on it."
+                    )
+                )
+
+        if self.selected_income_source:
+            available_source_names = {
+                row[
+                    "Reason"
+                ]
+                for row
+                in self.analyzer.reason_stats
+            }
+
+            if (
+                self.selected_income_source
+                in available_source_names
+            ):
+                self.view_income_source_users(
+                    self.selected_income_source,
+                    scroll=False,
+                )
+            else:
+                self.selected_income_source = None
+                self.source_users_table.set_data(
+                    []
+                )
+                self.source_user_title_label.config(
+                    text="No income source selected"
+                )
+                self.source_user_detail_card.set_text(
+                    (
+                        "Double-click an income source above to see its users ranked from highest to lowest NET earned."
+                    )
+                )
+
         self.hourly_table.set_data(
             self.analyzer.hourly_stats
         )
@@ -16692,6 +21104,22 @@ class EconomyViewer:
         else:
             typical_month_text = "about even after 30 days"
 
+        typical_actual_30d = typical[
+            "Last 30d Actual"
+        ]
+        if typical_actual_30d > 0:
+            typical_actual_text = (
+                f"They actually gained {typical_actual_30d:,.0f} during the newest 30 days in the database."
+            )
+        elif typical_actual_30d < 0:
+            typical_actual_text = (
+                f"They actually lost {abs(typical_actual_30d):,.0f} during the newest 30 days in the database."
+            )
+        else:
+            typical_actual_text = (
+                "They were about even during the newest 30 days in the database."
+            )
+
         projected = top_projected["30d Net"]
         if projected > 0:
             projected_text = (
@@ -16720,24 +21148,27 @@ class EconomyViewer:
 
         self.user_projection_card.set_text(
             (
+                "NET means the final amount after gains and losses are combined. Gross Earned is only money flowing in before losses, so it is not what this app means by 'earned'. "
+                "30d Net is a projection; Last 30d Actual is real recent history.\n\n"
                 f"This table contains {total_users:,} people from {hours:,.2f} hours of history, which is about {days:,.2f} days. "
                 f"Together they had {total_changes:,} balance changes, or about {average_changes_per_user:,.1f} per person. "
                 f"They received {total_received:,.0f} and spent or lost {total_lost:,.0f}. {total_result}\n\n"
 
                 f"A useful example of a fairly typical user is {self.analyzer.get_user_label(typical['User ID'])}, because their result is close to the middle of the group. "
                 f"They received {typical['Gross Earned']:,.0f}, spent or lost {typical['Gross Lost']:,.0f}, and {typical_result}. "
-                f"If that exact pace continued, their 30-day result would be {typical_month_text}. "
+                f"If that exact pace continued, their 30-day result would be {typical_month_text}. {typical_actual_text} "
                 f"They had {typical['Transactions']:,.0f} balance changes, used the economy for about {typical['Est. Active Hrs']:,.2f} hours, "
                 f"were active for about {typical['Activity %']:,.2f}% of the whole selected period, used it on {typical['Active Days']:,.0f} different days, "
                 f"and those uses were split into about {typical['Sessions']:,.0f} separate periods of activity. "
-                f"Their most profitable source after both gains and losses were counted was '{typical['Top Income Source']}', and their most recent economy use in this selection was {typical['Last Seen']}.\n\n"
+                f"Their most profitable source after both gains and losses were counted was '{typical['Top Income Source']}'.\n\n"
 
                 f"The most active person was {self.analyzer.get_user_label(most_active['User ID'])} with about {most_active['Est. Active Hrs']:,.2f} hours of economy use. "
                 f"Across everyone, the estimated combined time using economy commands was {total_active_hours:,.2f} hours, or about {average_activity_per_user:,.2f} hours per person. "
                 "That combined number can be larger than the length of the selected period because several people can be using the economy at the same time. "
                 "The activity time is estimated from five-minute blocks: if a person used the economy at least once in a five-minute block, that block counts as five minutes.\n\n"
 
-                f"{projected_text} The 30-day number is not a promise. It simply stretches the selected user's current pace out to 30 days."
+                f"{projected_text} That user's actual newest-30-day net was {top_projected['Last 30d Actual']:+,.0f}. "
+                "Projected 30-day values are not promises. They stretch the currently selected period's pace out to 30 days, while 'Last 30d Actual' is the unscaled result actually recorded in the newest 30 days of the database."
             )
         )
     def update_sim_window_info(
@@ -16809,6 +21240,10 @@ class EconomyViewer:
         per_hour = net / hours if hours else 0
         per_day = net / days if days else 0
         month_result = net * factor30
+        actual_last_30d = (
+            self.analyzer
+            .get_actual_last_30d_net()
+        )
         removed_per_100 = lost / earned * 100 if earned else 0
 
         overview = self.page_explanation_cards.get(
@@ -16895,7 +21330,8 @@ class EconomyViewer:
                     f"The 'average balance change per hour' is {per_hour:+,.2f}. {hour_text} "
                     f"That is the same pace as about {abs(per_day):,.0f} {'gained' if per_day > 0 else 'lost' if per_day < 0 else 'changed'} per day.\n\n"
 
-                    f"The 30-day result shown is {month_result:+,.2f}. {month_text} This assumes the same amount of activity and the same winning, losing and spending pattern continues.\n\n"
+                    f"The 30-day projection shown is {month_result:+,.2f}. {month_text} This assumes the same amount of activity and the same winning, losing and spending pattern continues. "
+                    f"For comparison, the actual unscaled net recorded during the newest 30 days in the database was {actual_last_30d:+,.2f}.\n\n"
 
                     f"The 'removed for every 100 added' number is {removed_per_100:,.2f}. {removal_text}"
                 )
@@ -16937,16 +21373,42 @@ class EconomyViewer:
                 else:
                     hourly_words = "changed user balances by almost nothing per hour"
 
+                net_per_user_per_hour = row[
+                    "Net / User / Hour"
+                ]
+                net_per_user_per_hour_ci = row.get(
+                    "Net / User / Hour 95% CI",
+                    "Not enough data",
+                )
+
+                if net_per_user_per_hour > 0:
+                    user_hour_words = (
+                        f"about {net_per_user_per_hour:,.2f} gained per participating user per selected-period hour"
+                    )
+                elif net_per_user_per_hour < 0:
+                    user_hour_words = (
+                        f"about {abs(net_per_user_per_hour):,.2f} lost per participating user per selected-period hour"
+                    )
+                else:
+                    user_hour_words = (
+                        "about 0 net per participating user per selected-period hour"
+                    )
+
                 return (
                     f"'{row['Reason']}' appeared {row['Transactions']:,} times and involved {row['Unique Users']:,} different users. "
                     f"It paid out {row['Gross Earned']:,.0f} and took {row['Gross Lost']:,.0f}. After those are compared, it {outcome}. "
-                    f"Spread across the whole selected period, that means it {hourly_words}."
+                    f"That works out to {user_hour_words}, with a 95% bootstrap CI of {net_per_user_per_hour_ci}. "
+                    f"Spread across the whole selected period, that means it {hourly_words}. "
+                    "The CI resamples participating users, so a wide range means the average differs a lot depending on which users you observe."
                 )
 
             source_card.set_text(
                 (
-                    "Each row is one game, command or money source. 'Money paid out' is everything that source added to users. "
-                    "'Money taken' is everything it removed. The difference tells you whether that source made users richer or poorer overall.\n\n"
+                    "Each row is one game, command or money source. 'Money paid out' / Gross Earned is supporting information only. "
+                    "Whenever Economy Analytics says a user or source 'earned' something, or shows an earnings percentage, it means NET after losses/costs from that same source are subtracted. "
+                    "'Money taken' is everything the source removed, and the difference tells you whether that source made users richer or poorer overall. "
+                    "'Net / User / Hour' divides that source's net result by its number of unique participating users and then by the length of the selected analysis period in hours. "
+                    "It is therefore a literal average net result per user per hour of the selected period, not per estimated active hour.\n\n"
                     f"The most-used source was {busiest['Reason']}. {source_sentence(busiest)}\n\n"
                     f"The source that helped users the most was {biggest_gain['Reason']}. {source_sentence(biggest_gain)}\n\n"
                     f"The source that hurt users the most was {biggest_loss['Reason']}. {source_sentence(biggest_loss)}"
@@ -17371,11 +21833,19 @@ class EconomyViewer:
             if tx["total"] < 0
         )
 
+        actual_last_30d = (
+            self.analyzer
+            .get_actual_last_30d_net(
+                user_id=user_id
+            )
+        )
+
         self.user_breakdown_caption.config(
             text=(
                 f"{len(txs):,} balance changes | "
                 f"about {activity['active_minutes']:,.0f} active minutes | "
-                f"30-day result: {net * factor:+,.0f}"
+                f"30d projected: {net * factor:+,.0f} | "
+                f"last 30d actual: {actual_last_30d:+,.0f}"
             )
         )
 
@@ -17446,7 +21916,8 @@ class EconomyViewer:
             income_text = (
                 f"Their best money source overall was '{top_income['Reason']}'. After counting both the {top_income['Gross Earned']:,.0f} it gave them "
                 f"and the {top_income['Gross Lost']:,.0f} it took from them, they came out {top_income['Net Profit']:,.0f} richer from that source. "
-                f"That makes it their top net income source across {top_income['Transactions']:,} recorded uses."
+                f"That represents {top_income['Net Earnings Share %']:,.1f}% of their positive NET earnings across all profitable sources, "
+                f"and makes it their top net income source across {top_income['Transactions']:,} recorded uses."
             )
         else:
             income_text = (
@@ -17467,7 +21938,8 @@ class EconomyViewer:
         self.user_breakdown_help_card.set_text(
             (
                 f"User {user_id} had {len(txs):,} balance changes. They received {earned:,.0f} in total and spent or lost {lost:,.0f}. "
-                f"The difference between those amounts is {abs(net):,.0f}. {result_text} {month_text}\n\n"
+                f"The difference between those amounts is {abs(net):,.0f}. {result_text} {month_text} "
+                f"Their actual unscaled net during the newest 30 days in the database was {actual_last_30d:+,.0f}.\n\n"
 
                 f"They appear to have spent about {activity['active_hours']:,.2f} hours actually using the economy. "
                 f"That is about {activity['activity_percent']:,.2f}% of the entire selected period. Their activity was split into about {activity['sessions']:,.0f} separate periods and spread across {activity['active_days']:,.0f} different days. "
@@ -17476,7 +21948,9 @@ class EconomyViewer:
                 f"{income_text}\n\n{loss_text}\n\n"
 
                 f"Their most recent balance change in the selected period was {last_transaction}. The money-source table below shows the same story broken down source by source: "
-                "money received is what that source paid them, money spent/lost is what it took, the final change is the difference, and the two percentage columns show how much of all their received money or all their lost money came from that source."
+                "Gross Earned is what that source paid them, Gross Lost is what it took, and Net Profit is the difference. "
+                "'Net Earnings Share %' is based only on positive NET profit after losses from the same source are subtracted. "
+                "'Loss Share %' still describes how much of their gross spending/losses came from that source."
             )
         )
     def enable_activity_target_group(
@@ -17558,6 +22032,13 @@ class EconomyViewer:
             context,
             use_actual_game_mix=False,
         )
+        prediction_cis = (
+            self.analyzer
+            .evaluate_activity_group_monthly_ci(
+                baseline_settings,
+                context,
+            )
+        )
 
         for group_name in ACTIVITY_GROUP_NAMES:
             member_count = len(
@@ -17573,10 +22054,39 @@ class EconomyViewer:
             if label is not None:
                 if member_count > 0:
                     label.config(
-                        text=f"{value:+,.0f} ({member_count} users)"
+                        text=(
+                            f"{value:+,.0f} | "
+                            f"CI {format_ci(prediction_cis.get(group_name), decimals=0)} "
+                            f"({member_count} users)"
+                        )
                     )
                 else:
                     label.config(
+                        text="No users"
+                    )
+
+            actual_label = self.sim_target_actual_labels.get(
+                group_name
+            )
+            if actual_label is not None:
+                if member_count > 0:
+                    actual_value = (
+                        self.analyzer
+                        .get_actual_last_30d_net(
+                            user_ids=context[
+                                "members"
+                            ].get(
+                                group_name,
+                                set(),
+                            )
+                        )
+                        / member_count
+                    )
+                    actual_label.config(
+                        text=f"{actual_value:+,.0f}"
+                    )
+                else:
+                    actual_label.config(
                         text="No users"
                     )
 
@@ -17709,6 +22219,13 @@ class EconomyViewer:
                 actual_context,
                 use_actual_game_mix=False,
             )
+            actual_prediction_cis = (
+                self.analyzer
+                .evaluate_activity_group_monthly_ci(
+                    actual_settings,
+                    actual_context,
+                )
+            )
 
             for group_name in ACTIVITY_GROUP_NAMES:
                 result_label = self.sim_target_result_labels.get(
@@ -17723,7 +22240,8 @@ class EconomyViewer:
                     miss = predicted - target
                     result_label.config(
                         text=(
-                            f"{predicted:+,.0f} | target {target:+,.0f} | miss {miss:+,.0f}"
+                            f"{predicted:+,.0f} | target {target:+,.0f} | miss {miss:+,.0f}\n"
+                            f"95% CI {format_ci(actual_prediction_cis.get(group_name), decimals=0)}"
                         ),
                         fg=TEXT,
                     )
@@ -18036,6 +22554,15 @@ class EconomyViewer:
         change = summary["24h_change"]
         current_games = summary["24h_current_games"]
         proposed_games = summary["24h_proposed_games"]
+        current_ci = summary.get(
+            "24h_current_model_net_ci"
+        )
+        proposed_ci = summary.get(
+            "24h_proposed_net_ci"
+        )
+        change_ci = summary.get(
+            "24h_change_ci"
+        )
 
         def result_words(value):
             if value > 0:
@@ -18078,7 +22605,14 @@ class EconomyViewer:
             ),
             (
                 f"With the current settings, {result_words(current_result)} from these games during a normal day. "
-                f"With your new settings, {result_words(proposed_result)}. {overall_change}"
+                f"The 95% user-bootstrap range for the total is {format_ci(current_ci, decimals=0)}. "
+                f"With your new settings, {result_words(proposed_result)}, with a 95% range of {format_ci(proposed_ci, decimals=0)}. "
+                f"The change itself has a 95% range of {format_ci(change_ci, decimals=0)}. {overall_change}"
+            ),
+            (
+                "How to read those simulator confidence intervals: the game model is held fixed and the app resamples whole users. "
+                "So the range mainly shows uncertainty caused by different users having different activity levels. "
+                "It does not include every possible source of model error."
             ),
         ]
 
@@ -18269,8 +22803,12 @@ class EconomyViewer:
 
             self.sim_summary_label.config(
                 text=(
-                    f"Players currently finish {summary['24h_current_model_net']:+,.0f} per day from these games. "
-                    f"With the new settings they finish {summary['24h_proposed_net']:+,.0f} per day. "
+                    f"Current: {summary['24h_current_model_net']:+,.0f}/day "
+                    f"(95% CI {format_ci(summary.get('24h_current_model_net_ci'), decimals=0)}). "
+                    f"Proposed: {summary['24h_proposed_net']:+,.0f}/day "
+                    f"(95% CI {format_ci(summary.get('24h_proposed_net_ci'), decimals=0)}). "
+                    f"Change: {summary['24h_change']:+,.0f}/day "
+                    f"(95% CI {format_ci(summary.get('24h_change_ci'), decimals=0)}). "
                     f"{short_meaning}"
                 )
             )
